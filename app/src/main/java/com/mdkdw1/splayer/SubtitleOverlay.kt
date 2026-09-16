@@ -1,7 +1,12 @@
 package com.mdkdw1.splayer
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -17,7 +22,9 @@ fun SubtitleOverlay(
     cue: SubtitleCue,
     modifier: Modifier = Modifier
 ) {
-    if (cue.translated.isBlank() && cue.original.isBlank()) return
+    if (cue.original.isBlank() && cue.translated.isBlank()) return
+
+    val showOriginalSmall = cue.translated.isNotBlank() && cue.original.isNotBlank()
 
     Box(
         modifier = modifier
@@ -31,7 +38,7 @@ fun SubtitleOverlay(
                 .background(Color.Black.copy(alpha = 0.7f), RoundedCornerShape(8.dp))
                 .padding(horizontal = 12.dp, vertical = 8.dp)
         ) {
-            if (cue.original.isNotBlank()) {
+            if (showOriginalSmall) {
                 Text(
                     text = cue.original,
                     color = Color.White.copy(alpha = 0.6f),
@@ -39,14 +46,12 @@ fun SubtitleOverlay(
                 )
                 Spacer(Modifier.height(4.dp))
             }
-            if (cue.translated.isNotBlank()) {
-                Text(
-                    text = cue.translated,
-                    color = Color.White,
-                    fontSize = 16.sp,
-                    fontWeight = FontWeight.Bold
-                )
-            }
+            Text(
+                text = if (cue.translated.isNotBlank()) cue.translated else cue.original,
+                color = Color.White,
+                fontSize = 16.sp,
+                fontWeight = FontWeight.Bold
+            )
         }
     }
 }
