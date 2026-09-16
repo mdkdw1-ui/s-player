@@ -201,6 +201,10 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel()) {
                         "Whisper ${whisperModel.model.displayName} 모델 필요 (${whisperModel.model.sizeMb}MB)",
                         style = MaterialTheme.typography.bodyMedium
                     )
+                    Text(
+                        whisperModel.model.description + if (whisperModel.model.recommended) " ⭐ 권장" else "",
+                        style = MaterialTheme.typography.bodySmall
+                    )
                     Spacer(Modifier.height(8.dp))
                     if (whisperModel.downloading) {
                         LinearProgressIndicator(

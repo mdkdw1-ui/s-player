@@ -61,6 +61,19 @@ object SubtitlePipeline {
     ): File? {
         LogBus.log(TAG, "=== URL START: $url")
 
+        // ---------- 캐시 확인 ----------
+        if (SubtitleCache.exists(context, url, targetLang)) {
+            LogBus.log(TAG, "캐시 히트!")
+            onProgress(Progress("cache", 100, "캐시된 자막 로드"))
+            val srt = SubtitleCache.read(context, url, targetLang)
+            if (srt != null) {
+                val segs = SubtitleCache.parseSrt(srt)
+                segs.forEach { onSegment(it) }
+                // 캐시 파일을 그대로 반환
+                return SubtitleCache.srtFile(context, url, targetLang)
+            }
+        }
+
         onProgress(Progress("extract", 0, "영상 정보 추출 중..."))
         val info = StreamExtractor.extract(url).getOrNull()
         if (info == null) {
@@ -87,7 +100,7 @@ object SubtitlePipeline {
         }
         onProgress(Progress("download", 100, "다운로드 완료"))
 
-        return processAudioFile(context, audioFile, model, sourceLang, targetLang, onProgress, onSegment)
+        return processAudioFile(context, audioFile, model, sourceLang, targetLang, onProgress, onSegment, cacheSourceKey = url)
     }
 
     // ================== 공통 ==================
@@ -98,7 +111,8 @@ object SubtitlePipeline {
         sourceLang: String,
         targetLang: String,
         onProgress: (Progress) -> Unit,
-        onSegment: (Segment) -> Unit
+        onSegment: (Segment) -> Unit,
+        cacheSourceKey: String? = null
     ): File? = withContext(Dispatchers.IO) {
 
         onProgress(Progress("decode", 0, "오디오 디코딩 중..."))
@@ -180,6 +194,11 @@ object SubtitlePipeline {
         val srtFile = File(AudioPaths.subtitleDir(context), "test_${targetLang}.srt")
         writeSrt(srtFile, finalSegments)
         LogBus.log(TAG, "[4] SRT: ${srtFile.absolutePath}")
+
+        // 캐시에도 저장 (URL 기반일 때)
+        if (cacheSourceKey != null) {
+            SubtitleCache.write(context, cacheSourceKey, targetLang, srtFile.readText())
+        }
 
         onProgress(Progress("done", 100, "완료: ${finalSegments.size} 세그먼트"))
         srtFile
