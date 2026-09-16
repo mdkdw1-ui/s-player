@@ -86,7 +86,7 @@ dependencies {
 
     // NewPipe Extractor
     implementation("com.github.TeamNewPipe:NewPipeExtractor:v0.24.5")
-    implementation("com.github.TeamNewPipe:nanojson:1.8.0")
+    implementation("com.grack:nanojson:1.8.0")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
 }
