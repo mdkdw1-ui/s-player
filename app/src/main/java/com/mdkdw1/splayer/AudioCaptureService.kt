@@ -33,16 +33,27 @@ class AudioCaptureService : Service() {
         const val EXTRA_RESULT_CODE = "result_code"
         const val EXTRA_RESULT_DATA = "result_data"
 
-        // 캡처 콜백 (앱 프로세스 내에서 공유)
         var onSamples: ((FloatArray, Int) -> Unit)? = null
+        var onLevel: ((Float) -> Unit)? = null      // RMS(증폭 후, 0~1)
+        var onRawLevel: ((Float) -> Unit)? = null   // RMS(원본, 0~1)
         var isRunning: Boolean = false
             private set
+
+        // AGC 파라미터
+        private const val TARGET_RMS = 0.12f        // 목표 RMS (약 -18dB)
+        private const val MIN_RMS_TO_GAIN = 0.0015f // 이보다 조용하면 증폭 안 함(무음 취급)
+        private const val MAX_GAIN = 15f            // 최대 15배
+        private const val SMOOTH = 0.3f             // 게인 스무딩 (0=즉시, 1=고정)
     }
 
     private var mediaProjection: MediaProjection? = null
     private var audioRecord: AudioRecord? = null
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private var captureJob: Job? = null
+
+    // 스무딩된 게인 상태
+    private var smoothGain = 1f
+    private var lastLevelLogAt = 0L
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -79,7 +90,7 @@ class AudioCaptureService : Service() {
         val encoding = AudioFormat.ENCODING_PCM_16BIT
 
         val minBuf = AudioRecord.getMinBufferSize(sampleRate, channelMask, encoding)
-        val bufSize = maxOf(minBuf, sampleRate * 2 * 2) // 1초 분량
+        val bufSize = maxOf(minBuf, sampleRate * 2 * 2)
 
         val config = AudioPlaybackCaptureConfiguration.Builder(projection)
             .addMatchingUsage(AudioAttributes.USAGE_MEDIA)
@@ -111,7 +122,8 @@ class AudioCaptureService : Service() {
 
         audioRecord?.startRecording()
         isRunning = true
-        LogBus.log("CAP", "캡처 시작 sampleRate=$sampleRate stereo")
+        smoothGain = 1f
+        LogBus.log("CAP", "캡처 시작 sampleRate=$sampleRate stereo, AGC on")
 
         captureJob = scope.launch {
             val buf = ByteArray(bufSize)
@@ -119,19 +131,75 @@ class AudioCaptureService : Service() {
                 val n = audioRecord?.read(buf, 0, buf.size) ?: -1
                 if (n <= 0) continue
 
-                // 16bit stereo → FloatArray (모노 다운믹스)
-                val shorts = ByteBuffer.wrap(buf, 0, n).order(ByteOrder.LITTLE_ENDIAN).asShortBuffer()
-                val frames = shorts.remaining() / 2  // stereo
-                val out = FloatArray(frames)
+                val shorts = ByteBuffer.wrap(buf, 0, n)
+                    .order(ByteOrder.LITTLE_ENDIAN).asShortBuffer()
+                val frames = shorts.remaining() / 2
+                val raw = FloatArray(frames)
                 for (i in 0 until frames) {
                     val l = shorts.get(i * 2).toFloat() / 32768f
                     val r = shorts.get(i * 2 + 1).toFloat() / 32768f
-                    out[i] = (l + r) * 0.5f
+                    raw[i] = (l + r) * 0.5f
                 }
 
-                onSamples?.invoke(out, sampleRate)
+                // 원본 RMS
+                val rawRms = rms(raw)
+                onRawLevel?.invoke(rawRms)
+
+                // AGC 적용
+                val amplified = applyAgc(raw, rawRms)
+
+                // 증폭 후 RMS
+                val ampRms = rms(amplified)
+                onLevel?.invoke(ampRms)
+
+                // 3초마다 로그
+                val now = System.currentTimeMillis()
+                if (now - lastLevelLogAt > 3000) {
+                    lastLevelLogAt = now
+                    LogBus.log(
+                        "CAP",
+                        "rawRms=%.4f gain=%.2fx outRms=%.4f".format(rawRms, smoothGain, ampRms)
+                    )
+                }
+
+                onSamples?.invoke(amplified, sampleRate)
             }
         }
+    }
+
+    private fun rms(arr: FloatArray): Float {
+        if (arr.isEmpty()) return 0f
+        var sum = 0.0
+        for (s in arr) sum += s * s
+        return kotlin.math.sqrt(sum / arr.size).toFloat()
+    }
+
+    /**
+     * 자동 게인.
+     * - 원본 RMS 가 MIN_RMS_TO_GAIN 보다 작으면 그대로 반환(무음/저잡음 증폭 방지)
+     * - 그 외엔 TARGET_RMS 로 정규화, MAX_GAIN 상한
+     * - 게인은 SMOOTH 계수로 지수이동평균 → 순간 볼륨 변화에 급격히 반응 안 함
+     */
+    private fun applyAgc(input: FloatArray, rawRms: Float): FloatArray {
+        if (rawRms < MIN_RMS_TO_GAIN) {
+            // 저레벨: 게인 서서히 원복
+            smoothGain = smoothGain * (1 - SMOOTH) + 1f * SMOOTH
+            return input
+        }
+
+        val desired = (TARGET_RMS / rawRms).coerceIn(1f, MAX_GAIN)
+        smoothGain = smoothGain * (1 - SMOOTH) + desired * SMOOTH
+        smoothGain = smoothGain.coerceIn(1f, MAX_GAIN)
+
+        if (kotlin.math.abs(smoothGain - 1f) < 0.02f) {
+            return input
+        }
+
+        val out = FloatArray(input.size)
+        for (i in input.indices) {
+            out[i] = (input[i] * smoothGain).coerceIn(-1f, 1f)
+        }
+        return out
     }
 
     private fun stopCapture() {
@@ -164,7 +232,7 @@ class AudioCaptureService : Service() {
         }
         return Notification.Builder(this, CHANNEL_ID)
             .setContentTitle("S-Player")
-            .setContentText("시스템 오디오 번역 중")
+            .setContentText("시스템 오디오 번역 중 (AGC)")
             .setSmallIcon(android.R.drawable.ic_media_play)
             .setOngoing(true)
             .build()

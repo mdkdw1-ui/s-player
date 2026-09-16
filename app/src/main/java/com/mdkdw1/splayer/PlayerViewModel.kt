@@ -44,6 +44,14 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     private val _captureOn = MutableStateFlow(false)
     val captureOn: StateFlow<Boolean> = _captureOn
 
+    // 원본 RMS (증폭 전). UI에서 "볼륨 낮음" 경고에 사용
+    private val _rawLevel = MutableStateFlow(0f)
+    val rawLevel: StateFlow<Float> = _rawLevel
+
+    // 증폭 후 RMS (STT에 들어가는 신호 세기)
+    private val _outLevel = MutableStateFlow(0f)
+    val outLevel: StateFlow<Float> = _outLevel
+
     private val _videoUrl = MutableStateFlow(
         "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4"
     )
@@ -66,6 +74,12 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
 
         AudioCaptureService.onSamples = { samples, rate ->
             pipeline?.push(samples, sampleRate = rate)
+        }
+        AudioCaptureService.onRawLevel = { rms ->
+            _rawLevel.value = rms
+        }
+        AudioCaptureService.onLevel = { rms ->
+            _outLevel.value = rms
         }
     }
 
@@ -142,6 +156,10 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         ctx.stopService(Intent(ctx, AudioCaptureService::class.java))
         _captureOn.value = false
         AudioCaptureService.onSamples = null
+        AudioCaptureService.onRawLevel = null
+        AudioCaptureService.onLevel = null
+        _rawLevel.value = 0f
+        _outLevel.value = 0f
         LogBus.log("CAP", "stop service")
     }
 
@@ -186,5 +204,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         pipeline?.close()
         pipeline = null
         AudioCaptureService.onSamples = null
+        AudioCaptureService.onRawLevel = null
+        AudioCaptureService.onLevel = null
     }
 }

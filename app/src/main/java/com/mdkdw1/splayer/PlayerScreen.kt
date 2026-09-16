@@ -1,6 +1,7 @@
 package com.mdkdw1.splayer
 
 import android.webkit.WebView
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -13,6 +14,7 @@ import androidx.compose.material.icons.filled.BugReport
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MicOff
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.VolumeDown
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -40,11 +42,18 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel()) {
     val videoFound by vm.videoFound.collectAsState()
     val modelStatus by vm.modelStatus.collectAsState()
     val captureOn by vm.captureOn.collectAsState()
+    val rawLevel by vm.rawLevel.collectAsState()
+    val outLevel by vm.outLevel.collectAsState()
     val logs by LogBus.lines.collectAsState()
 
     var webViewRef by remember { mutableStateOf<WebView?>(null) }
     var langMenuOpen by remember { mutableStateOf(false) }
     var logPanelOpen by remember { mutableStateOf(false) }
+
+    // "볼륨 낮음" 판정: 캡처 중 + 원본 RMS 가 임계 이하 + 실제 소리가 나는 중
+    // 완전 무음과 구분하기 위해 약간의 시간 누적 필요. 여기서는 단순 임계값.
+    val lowVolume = captureOn && rawLevel in 0.0001f..0.005f
+    val silence = captureOn && rawLevel <= 0.0001f
 
     val captureLauncher = rememberCapturePermissionLauncher(
         onGranted = { code, data -> vm.startCapture(code, data) },
@@ -71,7 +80,6 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel()) {
                 }
             },
             actions = {
-                // 시스템 오디오 캡처 토글
                 IconButton(onClick = {
                     if (captureOn) vm.stopCapture()
                     else captureLauncher.launch(buildCaptureIntent(ctx))
@@ -113,6 +121,7 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel()) {
             }
         )
 
+        // 모델 미설치 배너
         if (!modelStatus.installed) {
             Card(
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp)
@@ -142,6 +151,54 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel()) {
             }
         }
 
+        // 저볼륨 경고
+        AnimatedVisibility(visible = lowVolume) {
+            Card(
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.tertiaryContainer
+                ),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 4.dp)
+            ) {
+                Row(
+                    modifier = Modifier.padding(12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(Icons.Default.VolumeDown, contentDescription = null)
+                    Spacer(Modifier.width(8.dp))
+                    Column {
+                        Text(
+                            "볼륨이 낮아 인식률이 떨어질 수 있습니다",
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                        Text(
+                            "rawRms=%.4f → AGC 증폭 중".format(rawLevel),
+                            style = MaterialTheme.typography.labelSmall
+                        )
+                    }
+                }
+            }
+        }
+
+        // 완전 무음 안내
+        AnimatedVisibility(visible = silence) {
+            Card(
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceVariant
+                ),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 4.dp)
+            ) {
+                Text(
+                    "무음 구간입니다. 영상을 재생하세요.",
+                    modifier = Modifier.padding(12.dp),
+                    style = MaterialTheme.typography.bodySmall
+                )
+            }
+        }
+
         if (mode == PlayerMode.WEBVIEW) {
             OutlinedTextField(
                 value = urlInput,
@@ -157,6 +214,7 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel()) {
             )
         }
 
+        // 레벨 미터 + 배속
         Row(
             modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -171,6 +229,26 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel()) {
                 modifier = Modifier.weight(1f)
             )
             Text("4x", style = MaterialTheme.typography.labelMedium)
+        }
+
+        // 캡처 중일 때만 레벨 미터
+        AnimatedVisibility(visible = captureOn) {
+            Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 2.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("in ", fontSize = 9.sp, color = Color.Gray)
+                    LinearProgressIndicator(
+                        progress = { rawLevel.coerceIn(0f, 1f) },
+                        modifier = Modifier.weight(1f).height(4.dp)
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text("out ", fontSize = 9.sp, color = Color.Gray)
+                    LinearProgressIndicator(
+                        progress = { outLevel.coerceIn(0f, 1f) },
+                        modifier = Modifier.weight(1f).height(4.dp),
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
+            }
         }
 
         Box(modifier = Modifier.weight(1f)) {
