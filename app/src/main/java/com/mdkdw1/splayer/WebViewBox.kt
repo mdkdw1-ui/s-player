@@ -27,12 +27,11 @@ class JsBridge(
     private val onCaption: (String) -> Unit,
     private val onAudioChunk: (FloatArray) -> Unit,
     private val onVideoFound: (Boolean) -> Unit,
-    private val onUrlChanged: (String) -> Unit
+    private val onUrlChanged: (String) -> Unit,
+    private val onLog: (String) -> Unit
 ) {
     @JavascriptInterface
-    fun onCaption(text: String) {
-        onCaption(text)
-    }
+    fun onCaption(text: String) { onCaption(text) }
 
     @JavascriptInterface
     fun onAudio(dataJson: String) {
@@ -43,14 +42,13 @@ class JsBridge(
     }
 
     @JavascriptInterface
-    fun onVideoFound(found: Boolean) {
-        onVideoFound(found)
-    }
+    fun onVideoFound(found: Boolean) { onVideoFound(found) }
 
     @JavascriptInterface
-    fun onUrlChanged(url: String) {
-        onUrlChanged(url)
-    }
+    fun onUrlChanged(url: String) { onUrlChanged(url) }
+
+    @JavascriptInterface
+    fun onLog(msg: String) { onLog(msg) }
 }
 
 @SuppressLint("SetJavaScriptEnabled")
@@ -62,19 +60,15 @@ fun WebViewBox(
     onAudioChunk: (FloatArray) -> Unit,
     onVideoFound: (Boolean) -> Unit,
     onUrlChanged: (String) -> Unit,
+    onLog: (String) -> Unit,
     onWebViewReady: (WebView) -> Unit,
     modifier: Modifier = Modifier
 ) {
     var progress by remember { mutableIntStateOf(0) }
     var webView by remember { mutableStateOf<WebView?>(null) }
 
-    // loadUrl 값이 바뀔 때만 실제 로드
     LaunchedEffect(loadUrl) {
-        webView?.let { wv ->
-            if (wv.url != loadUrl) {
-                wv.loadUrl(loadUrl)
-            }
-        }
+        webView?.let { wv -> if (wv.url != loadUrl) wv.loadUrl(loadUrl) }
     }
 
     LaunchedEffect(speed, webView) {
@@ -91,8 +85,7 @@ fun WebViewBox(
                 wv.settings.mediaPlaybackRequiresUserGesture = false
                 wv.settings.loadWithOverviewMode = true
                 wv.settings.useWideViewPort = true
-                wv.settings.userAgentString =
-                    wv.settings.userAgentString + " SPlayer/1.0"
+                wv.settings.userAgentString = wv.settings.userAgentString + " SPlayer/1.0"
 
                 wv.webChromeClient = object : WebChromeClient() {
                     override fun onProgressChanged(view: WebView?, newProgress: Int) {
@@ -101,22 +94,28 @@ fun WebViewBox(
                 }
 
                 wv.webViewClient = object : WebViewClient() {
-                    override fun onPageStarted(
-                        view: WebView?, url: String?, favicon: Bitmap?
-                    ) {
+                    override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                         super.onPageStarted(view, url, favicon)
                         url?.let { onUrlChanged(it) }
+                        onLog("page started: $url")
                     }
 
                     override fun onPageFinished(view: WebView?, url: String?) {
                         super.onPageFinished(view, url)
                         url?.let { onUrlChanged(it) }
+                        onLog("page finished: $url")
                         view?.injectAudioCaptureScript()
                     }
 
+                    override fun onReceivedError(
+                        view: WebView?, errorCode: Int, description: String?, failingUrl: String?
+                    ) {
+                        super.onReceivedError(view, errorCode, description, failingUrl)
+                        onLog("web error $errorCode: $description @ $failingUrl")
+                    }
+
                     override fun shouldOverrideUrlLoading(
-                        view: WebView?,
-                        request: WebResourceRequest?
+                        view: WebView?, request: WebResourceRequest?
                     ): Boolean {
                         val target = request?.url?.toString() ?: return false
                         onUrlChanged(target)
@@ -126,7 +125,7 @@ fun WebViewBox(
                 }
 
                 wv.addJavascriptInterface(
-                    JsBridge(onCaption, onAudioChunk, onVideoFound, onUrlChanged),
+                    JsBridge(onCaption, onAudioChunk, onVideoFound, onUrlChanged, onLog),
                     "AndroidBridge"
                 )
 
@@ -140,9 +139,7 @@ fun WebViewBox(
         if (progress in 1..99) {
             LinearProgressIndicator(
                 progress = { progress / 100f },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .align(Alignment.TopCenter)
+                modifier = Modifier.fillMaxWidth().align(Alignment.TopCenter)
             )
         }
     }

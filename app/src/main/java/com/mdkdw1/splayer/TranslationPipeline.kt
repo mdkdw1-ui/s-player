@@ -25,17 +25,36 @@ class TranslationPipeline(
     @Volatile private var ready = false
     private var sourceRate = 48000
     private val targetRate = 16000
+    private var chunkCount = 0L
+    private var lastLogAt = 0L
 
     init {
         scope.launch {
             ready = vosk.initialize()
-            Log.i(TAG, "Vosk ready=$ready lang=${language.code}")
+            LogBus.log("PIPE", "vosk ready=$ready lang=${language.code}")
         }
     }
 
     fun push(samples: FloatArray, sampleRate: Int = 48000) {
-        if (!ready) return
+        if (!ready) {
+            // ready 안 됐을 때도 처음 한 번은 로그
+            if (chunkCount == 0L) LogBus.log("PIPE", "drop chunk (not ready)")
+            chunkCount++
+            return
+        }
         sourceRate = sampleRate
+        chunkCount++
+
+        // 3초마다 상태 로그
+        val now = System.currentTimeMillis()
+        if (now - lastLogAt > 3000) {
+            lastLogAt = now
+            var sum = 0.0
+            for (s in samples) sum += s * s
+            val rms = kotlin.math.sqrt(sum / samples.size)
+            LogBus.log("PIPE", "chunks=$chunkCount rms=%.4f".format(rms))
+        }
+
         val pcm16 = floatToPcm16Resampled(samples, sourceRate, targetRate)
 
         scope.launch {
@@ -43,20 +62,20 @@ class TranslationPipeline(
                 try {
                     val text = vosk.acceptWaveform(pcm16)
                     if (text.isNotBlank()) {
-                        // 원본이 한국어면 번역 생략, 그 외에는 무조건 한국어로
-                        val translated = if (language.code == "ko") {
-                            ""   // 원본 그대로 표시
+                        LogBus.log("STT", "text=${text.take(60)}")
+                        val translated = if (language.code == "ko") ""
+                        else translator.translate(text, target = "ko", source = language.code)
+                        if (translated.isNotBlank()) {
+                            LogBus.log("TRANS", translated.take(60))
+                            onResult(text, translated)
+                        } else if (language.code != "ko") {
+                            LogBus.log("TRANS", "번역 실패/빈결과")
                         } else {
-                            translator.translate(
-                                text = text,
-                                target = "ko",
-                                source = language.code   // en, ja 등 명시
-                            )
+                            onResult(text, "")
                         }
-                        onResult(text, translated)
                     }
                 } catch (e: Exception) {
-                    Log.e(TAG, "accept 오류", e)
+                    LogBus.log("PIPE", "accept 오류 ${e.message}")
                 }
             }
         }

@@ -57,18 +57,22 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
 
     init {
         refreshModelStatus()
+        LogBus.log("VM", "init")
     }
 
     private fun refreshModelStatus() {
         val lang = _modelStatus.value.language
         val installed = ModelDownloader.isInstalled(getApplication(), lang)
+        LogBus.log("VM", "model ${lang.code} installed=$installed")
         _modelStatus.value = _modelStatus.value.copy(installed = installed, error = null)
         if (installed) createPipeline(lang)
     }
 
     private fun createPipeline(lang: SttLanguage) {
         pipeline?.close()
+        LogBus.log("VM", "create pipeline lang=${lang.code}")
         pipeline = TranslationPipeline(getApplication(), lang) { original, translated ->
+            LogBus.log("RESULT", "orig=${original.take(40)} / trans=${translated.take(40)}")
             _subtitle.value = SubtitleCue(original = original, translated = translated)
         }
     }
@@ -83,15 +87,15 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     fun downloadModel() {
         val lang = _modelStatus.value.language
         if (_modelStatus.value.downloading) return
-
+        LogBus.log("VM", "download start ${lang.code}")
         _modelStatus.value = _modelStatus.value.copy(
             downloading = true, progress = 0f, error = null
         )
-
         viewModelScope.launch {
             val ok = ModelDownloader.download(getApplication(), lang) { p ->
                 _modelStatus.value = _modelStatus.value.copy(progress = p)
             }
+            LogBus.log("VM", "download done ok=$ok")
             if (ok) {
                 _modelStatus.value = _modelStatus.value.copy(
                     downloading = false, installed = true, progress = 1f
@@ -109,20 +113,23 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     fun setSpeed(s: Float) { _speed.value = s.coerceIn(0.25f, 4.0f) }
     fun updateSubtitle(cue: SubtitleCue) { _subtitle.value = cue }
     fun setVideoUrl(url: String) { _videoUrl.value = url }
-    fun setVideoFound(found: Boolean) { _videoFound.value = found }
+    fun setVideoFound(found: Boolean) {
+        LogBus.log("VM", "videoFound=$found")
+        _videoFound.value = found
+    }
 
     fun onUrlInputChange(text: String) { _urlInput.value = text }
+
+    fun onJsLog(msg: String) { LogBus.log("JS", msg) }
 
     fun navigateToInput() {
         var target = _urlInput.value.trim()
         if (target.isEmpty()) return
         if (!target.startsWith("http://") && !target.startsWith("https://")) {
-            target = if (target.contains(".") && !target.contains(" ")) {
-                "https://$target"
-            } else {
-                "https://www.google.com/search?q=" + java.net.URLEncoder.encode(target, "UTF-8")
-            }
+            target = if (target.contains(".") && !target.contains(" ")) "https://$target"
+            else "https://www.google.com/search?q=" + java.net.URLEncoder.encode(target, "UTF-8")
         }
+        LogBus.log("VM", "navigate $target")
         _loadUrl.value = target
         _currentUrl.value = target
         _urlInput.value = target

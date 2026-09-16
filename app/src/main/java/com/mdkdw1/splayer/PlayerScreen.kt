@@ -1,46 +1,26 @@
 package com.mdkdw1.splayer
 
 import android.webkit.WebView
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.BugReport
 import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material3.Button
-import androidx.compose.material3.Card
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
-import androidx.compose.material3.LinearProgressIndicator
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Slider
-import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -54,9 +34,11 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel()) {
     val urlInput by vm.urlInput.collectAsState()
     val videoFound by vm.videoFound.collectAsState()
     val modelStatus by vm.modelStatus.collectAsState()
+    val logs by LogBus.lines.collectAsState()
 
     var webViewRef by remember { mutableStateOf<WebView?>(null) }
     var langMenuOpen by remember { mutableStateOf(false) }
+    var logPanelOpen by remember { mutableStateOf(false) }
 
     Column(modifier = Modifier.fillMaxSize()) {
         TopAppBar(
@@ -77,7 +59,6 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel()) {
                 }
             },
             actions = {
-                // 언어 선택
                 Box {
                     TextButton(onClick = { langMenuOpen = true }) {
                         Text(modelStatus.language.displayName)
@@ -102,28 +83,27 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel()) {
                         Icon(Icons.Default.Refresh, contentDescription = "새로고침")
                     }
                 }
+                IconButton(onClick = { logPanelOpen = !logPanelOpen }) {
+                    Icon(Icons.Default.BugReport, contentDescription = "로그")
+                }
                 TextButton(
                     onClick = { vm.setMode(PlayerMode.LOCAL) },
                     enabled = mode != PlayerMode.LOCAL
-                ) { Text("Local") }
+                ) { Text("L") }
                 TextButton(
                     onClick = { vm.setMode(PlayerMode.WEBVIEW) },
                     enabled = mode != PlayerMode.WEBVIEW
-                ) { Text("Web") }
+                ) { Text("W") }
             }
         )
 
-        // 모델 다운로드 배너
         if (!modelStatus.installed) {
             Card(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 12.dp, vertical = 4.dp)
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp)
             ) {
                 Column(modifier = Modifier.padding(12.dp)) {
                     Text(
-                        "${modelStatus.language.displayName} 음성인식 모델이 필요합니다 " +
-                            "(${modelStatus.language.approxMb}MB)",
+                        "${modelStatus.language.displayName} 모델 필요 (${modelStatus.language.approxMb}MB)",
                         style = MaterialTheme.typography.bodyMedium
                     )
                     Spacer(Modifier.height(8.dp))
@@ -133,17 +113,12 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel()) {
                             modifier = Modifier.fillMaxWidth()
                         )
                         Spacer(Modifier.height(4.dp))
-                        Text("다운로드 중… ${(modelStatus.progress * 100).toInt()}%")
+                        Text("다운로드 ${(modelStatus.progress * 100).toInt()}%")
                     } else {
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Button(onClick = { vm.downloadModel() }) {
-                                Text("다운로드")
-                            }
-                            if (modelStatus.error != null) {
-                                Text(
-                                    modelStatus.error ?: "",
-                                    color = MaterialTheme.colorScheme.error
-                                )
+                            Button(onClick = { vm.downloadModel() }) { Text("다운로드") }
+                            modelStatus.error?.let {
+                                Text(it, color = MaterialTheme.colorScheme.error)
                             }
                         }
                     }
@@ -151,29 +126,23 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel()) {
             }
         }
 
-        // 주소창
         if (mode == PlayerMode.WEBVIEW) {
             OutlinedTextField(
                 value = urlInput,
                 onValueChange = { vm.onUrlInputChange(it) },
                 singleLine = true,
-                placeholder = { Text("https://example.com 또는 검색어") },
+                placeholder = { Text("URL 또는 검색어") },
                 keyboardOptions = KeyboardOptions(
                     keyboardType = KeyboardType.Uri,
                     imeAction = ImeAction.Go
                 ),
                 keyboardActions = KeyboardActions(onGo = { vm.navigateToInput() }),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 12.dp, vertical = 4.dp)
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp)
             )
         }
 
-        // 배속 슬라이더
         Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 4.dp),
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
@@ -188,7 +157,7 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel()) {
             Text("4x", style = MaterialTheme.typography.labelMedium)
         }
 
-        Box(modifier = Modifier.fillMaxSize()) {
+        Box(modifier = Modifier.weight(1f)) {
             when (mode) {
                 PlayerMode.LOCAL -> ExoPlayerBox(
                     url = videoUrl,
@@ -199,18 +168,51 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel()) {
                     loadUrl = loadUrl,
                     speed = speed,
                     onCaption = { text ->
-                        vm.updateSubtitle(
-                            SubtitleCue(original = text, translated = "[번역] $text")
-                        )
+                        vm.updateSubtitle(SubtitleCue(original = text, translated = "[번역] $text"))
                     },
                     onAudioChunk = { vm.onAudioChunk(it) },
                     onVideoFound = { vm.setVideoFound(it) },
                     onUrlChanged = { vm.onWebViewUrlChanged(it) },
+                    onLog = { vm.onJsLog(it) },
                     onWebViewReady = { webViewRef = it },
                     modifier = Modifier.fillMaxSize()
                 )
             }
             SubtitleOverlay(cue = subtitle)
+        }
+
+        if (logPanelOpen) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(200.dp)
+                    .background(Color(0xEE111111))
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("로그 (${logs.size})", color = Color.White, fontSize = 12.sp)
+                    Spacer(Modifier.weight(1f))
+                    TextButton(onClick = { LogBus.clear() }) {
+                        Text("지우기", fontSize = 12.sp)
+                    }
+                    TextButton(onClick = { logPanelOpen = false }) {
+                        Text("닫기", fontSize = 12.sp)
+                    }
+                }
+                LazyColumn(modifier = Modifier.fillMaxSize().padding(horizontal = 8.dp)) {
+                    items(logs) { line ->
+                        Text(
+                            text = line,
+                            color = Color(0xFFB0FFB0),
+                            fontSize = 10.sp,
+                            fontFamily = FontFamily.Monospace,
+                            modifier = Modifier.padding(vertical = 1.dp)
+                        )
+                    }
+                }
+            }
         }
     }
 }

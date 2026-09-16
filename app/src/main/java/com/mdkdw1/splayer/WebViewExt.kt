@@ -12,15 +12,21 @@ fun WebView.injectAudioCaptureScript() {
       var sourceNode = null;
       var processor = null;
 
+      function log(msg) {
+        try { AndroidBridge.onLog('JS: ' + msg); } catch (e) {}
+        console.log('[SPlayer] ' + msg);
+      }
+
       function notifyFound(found) {
         try { AndroidBridge.onVideoFound(found); } catch (e) {}
       }
 
-      function attach(video) {
-        if (!video || video.__splayerAttached) return;
+      function tryAttach(video) {
+        if (!video || video.__splayerAttached) return false;
         video.__splayerAttached = true;
         try {
           if (!ctx) ctx = new (window.AudioContext || window.webkitAudioContext)();
+          if (ctx.state === 'suspended') ctx.resume();
           sourceNode = ctx.createMediaElementSource(video);
           sourceNode.connect(ctx.destination);
 
@@ -34,29 +40,63 @@ fun WebView.injectAudioCaptureScript() {
           sourceNode.connect(processor);
           processor.connect(ctx.destination);
           notifyFound(true);
-          console.log('[SPlayer] audio capture attached');
+          log('attached to video (src=' + (video.currentSrc || video.src || '?').slice(0, 80) + ')');
+          return true;
         } catch (e) {
-          console.log('[SPlayer] attach failed: ' + e);
+          log('attach failed: ' + e);
+          return false;
         }
       }
 
-      function findVideo() {
-        var v = document.querySelector('video');
-        if (v) { attach(v); return true; }
-        return false;
+      function scanAll() {
+        var vids = document.querySelectorAll('video');
+        log('scan: found ' + vids.length + ' video tags');
+        for (var i = 0; i < vids.length; i++) {
+          tryAttach(vids[i]);
+        }
+        return vids.length > 0;
       }
 
-      if (!findVideo()) {
+      // iframe 내부도 시도 (same-origin 만)
+      function scanIframes() {
+        var iframes = document.querySelectorAll('iframe');
+        for (var i = 0; i < iframes.length; i++) {
+          try {
+            var doc = iframes[i].contentDocument;
+            if (!doc) continue;
+            var vids = doc.querySelectorAll('video');
+            for (var j = 0; j < vids.length; j++) tryAttach(vids[j]);
+          } catch (e) {
+            log('iframe blocked (cross-origin)');
+          }
+        }
+      }
+
+      if (!scanAll()) {
+        notifyFound(false);
         var obs = new MutationObserver(function() {
-          if (findVideo()) obs.disconnect();
+          if (scanAll()) obs.disconnect();
         });
         obs.observe(document.documentElement, { childList: true, subtree: true });
-        notifyFound(false);
+        log('waiting for video via MutationObserver');
       }
+      scanIframes();
 
       window.__splayerSetSpeed = function(s) {
         var v = document.querySelector('video');
         if (v) v.playbackRate = s;
+      };
+
+      window.__splayerState = function() {
+        var v = document.querySelector('video');
+        return JSON.stringify({
+          videoCount: document.querySelectorAll('video').length,
+          hasVideo: !!v,
+          paused: v ? v.paused : null,
+          currentTime: v ? v.currentTime : null,
+          ctxState: ctx ? ctx.state : null,
+          attached: v ? !!v.__splayerAttached : false
+        });
       };
     })();
     """.trimIndent()
@@ -65,4 +105,10 @@ fun WebView.injectAudioCaptureScript() {
 
 fun WebView.applyPlaybackSpeed(speed: Float) {
     evaluateJavascript("window.__splayerSetSpeed && window.__splayerSetSpeed($speed);", null)
+}
+
+fun WebView.queryState(callback: (String) -> Unit) {
+    evaluateJavascript("window.__splayerState && window.__splayerState();") { result ->
+        callback(result ?: "null")
+    }
 }
