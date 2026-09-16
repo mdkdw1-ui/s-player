@@ -106,6 +106,16 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel()) {
                     Icon(Icons.Default.Folder, contentDescription = "파일 STT")
                 }
 
+                // 현재 URL 로 STT
+                if (urlInput.isNotBlank()) {
+                    IconButton(onClick = {
+                        vm.runUrlStt(urlInput)
+                        sttPanelOpen = true
+                    }) {
+                        Icon(Icons.Default.Translate, contentDescription = "URL STT")
+                    }
+                }
+
                 // Whisper 모델 메뉴
                 Box {
                     TextButton(onClick = { whisperMenuOpen = true }) {

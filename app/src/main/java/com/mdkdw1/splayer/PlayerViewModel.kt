@@ -186,6 +186,47 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    fun runUrlStt(url: String) {
+        if (_sttState.value.running) return
+        val model = _whisperModel.value.model
+        if (!_whisperModel.value.installed) {
+            LogBus.log("STT", "모델 미설치")
+            return
+        }
+
+        _sttState.value = SttState(running = true, stage = "start", percent = 0)
+
+        viewModelScope.launch {
+            val srt = SubtitlePipeline.runFromUrl(
+                context = getApplication(),
+                url = url,
+                model = model,
+                sourceLang = "auto",
+                targetLang = "ko",
+                onProgress = { p ->
+                    _sttState.value = _sttState.value.copy(
+                        stage = p.stage, percent = p.percent, message = p.message
+                    )
+                    LogBus.log("URL", "${p.stage} ${p.percent}% ${p.message}")
+                },
+                onSegment = { seg ->
+                    _sttState.value = _sttState.value.copy(
+                        segments = _sttState.value.segments + seg
+                    )
+                },
+                onStreamInfo = { info ->
+                    LogBus.log("URL", "제목: ${info.title}, ${info.durationSec}초")
+                }
+            )
+
+            _sttState.value = _sttState.value.copy(
+                running = false,
+                srtPath = srt?.absolutePath,
+                stage = if (srt != null) "done" else "error"
+            )
+        }
+    }
+
     fun clearStt() {
         _sttState.value = SttState()
     }

@@ -26,6 +26,7 @@ object SubtitlePipeline {
         val message: String = ""
     )
 
+    // ================== 로컬 파일 ==================
     suspend fun run(
         context: Context,
         sourceUri: Uri,
@@ -34,41 +35,96 @@ object SubtitlePipeline {
         targetLang: String = "ko",
         onProgress: (Progress) -> Unit,
         onSegment: (Segment) -> Unit
-    ): File? = withContext(Dispatchers.IO) {
-        LogBus.log(TAG, "=== START")
-
+    ): File? {
+        LogBus.log(TAG, "=== 로컬 START")
         onProgress(Progress("copy", 0, "파일 복사 중..."))
         val inputFile = copyToCache(context, sourceUri)
-        if (inputFile == null) {
-            onProgress(Progress("error", 0, "파일 복사 실패")); return@withContext null
-        }
+            ?: run {
+                onProgress(Progress("error", 0, "파일 복사 실패"))
+                return null
+            }
         LogBus.log(TAG, "[1] 복사: ${inputFile.length()} bytes")
         onProgress(Progress("copy", 100, "복사 완료"))
+        return processAudioFile(context, inputFile, model, sourceLang, targetLang, onProgress, onSegment)
+    }
+
+    // ================== URL ==================
+    suspend fun runFromUrl(
+        context: Context,
+        url: String,
+        model: WhisperModel,
+        sourceLang: String = "auto",
+        targetLang: String = "ko",
+        onProgress: (Progress) -> Unit,
+        onSegment: (Segment) -> Unit,
+        onStreamInfo: (StreamResult) -> Unit = {}
+    ): File? {
+        LogBus.log(TAG, "=== URL START: $url")
+
+        onProgress(Progress("extract", 0, "영상 정보 추출 중..."))
+        val info = StreamExtractor.extract(url).getOrNull()
+        if (info == null) {
+            onProgress(Progress("error", 0, "스트림 추출 실패"))
+            return null
+        }
+        onStreamInfo(info)
+        onProgress(Progress("extract", 100, "${info.title} (${info.durationSec}s)"))
+
+        val audioUrl = info.audioUrl ?: info.videoUrl
+        if (audioUrl == null) {
+            onProgress(Progress("error", 0, "오디오 스트림 없음"))
+            return null
+        }
+        val ext = guessExt(info.audioMimeType ?: info.videoMimeType)
+
+        onProgress(Progress("download", 0, "오디오 다운로드 중..."))
+        val audioFile = StreamDownloader.download(context, audioUrl, "url_input", ext) { p ->
+            onProgress(Progress("download", (p * 100).toInt(), "다운로드 ${(p*100).toInt()}%"))
+        }
+        if (audioFile == null) {
+            onProgress(Progress("error", 0, "다운로드 실패"))
+            return null
+        }
+        onProgress(Progress("download", 100, "다운로드 완료"))
+
+        return processAudioFile(context, audioFile, model, sourceLang, targetLang, onProgress, onSegment)
+    }
+
+    // ================== 공통 ==================
+    private suspend fun processAudioFile(
+        context: Context,
+        inputFile: File,
+        model: WhisperModel,
+        sourceLang: String,
+        targetLang: String,
+        onProgress: (Progress) -> Unit,
+        onSegment: (Segment) -> Unit
+    ): File? = withContext(Dispatchers.IO) {
 
         onProgress(Progress("decode", 0, "오디오 디코딩 중..."))
         val wavFile = AudioPaths.tempWav(context, "test")
         if (wavFile.exists()) wavFile.delete()
-        val decodeOk = try { AudioDecoder.decodeToWav(inputFile, wavFile) } catch (e: Exception) {
-            LogBus.log(TAG, "[2] 예외: ${e.message}"); false
-        }
+
+        val decodeOk = try { AudioDecoder.decodeToWav(inputFile, wavFile) }
+        catch (e: Exception) { LogBus.log(TAG, "디코딩 예외: ${e.message}"); false }
+
         if (!decodeOk || !wavFile.exists()) {
-            LogBus.log(TAG, "[2] 실패")
-            onProgress(Progress("error", 0, "디코딩 실패")); return@withContext null
+            onProgress(Progress("error", 0, "디코딩 실패"))
+            return@withContext null
         }
         LogBus.log(TAG, "[2] WAV: ${wavFile.length()} bytes")
         onProgress(Progress("decode", 100, "디코딩 완료"))
 
         if (!WhisperModelDownloader.isInstalled(context, model)) {
-            LogBus.log(TAG, "[3] 모델 미설치")
-            onProgress(Progress("error", 0, "모델 미설치")); return@withContext null
+            onProgress(Progress("error", 0, "모델 미설치"))
+            return@withContext null
         }
         val modelPath = WhisperModelDownloader.modelFile(context, model).absolutePath
-        LogBus.log(TAG, "[3] 모델: $modelPath")
 
         val collected = mutableListOf<Segment>()
         val translator = GoogleTranslator()
         val translateQueue = java.util.concurrent.LinkedBlockingQueue<Segment>()
-        val segmentsLock = Object()
+        val lock = Object()
 
         val translatorThread = Thread {
             while (true) {
@@ -76,12 +132,10 @@ object SubtitlePipeline {
                 if (seg.original == "__DONE__") break
                 val translated = try {
                     if (targetLang == sourceLang) seg.original
-                    else kotlinx.coroutines.runBlocking {
-                        translator.translate(seg.original, targetLang, sourceLang)
-                    }
+                    else kotlinx.coroutines.runBlocking { translator.translate(seg.original, targetLang, sourceLang) }
                 } catch (e: Exception) { "" }
                 val finalSeg = seg.copy(translated = translated)
-                synchronized(segmentsLock) { collected.add(finalSeg) }
+                synchronized(lock) { collected.add(finalSeg) }
                 onSegment(finalSeg)
                 LogBus.log(TAG, "SEG [${finalSeg.startMs}ms] ${finalSeg.original.take(40)}")
             }
@@ -90,51 +144,54 @@ object SubtitlePipeline {
 
         onProgress(Progress("stt", 0, "음성 인식 중..."))
 
+        val threads = Runtime.getRuntime().availableProcessors().coerceAtMost(8)
         val sttOk = try {
             WhisperBridge.transcribe(
                 modelPath = modelPath,
                 wavPath = wavFile.absolutePath,
                 language = sourceLang,
-                threads = Runtime.getRuntime().availableProcessors().coerceAtMost(8),
+                threads = threads,
                 callback = object : WhisperBridge.SegmentCallback {
                     override fun onSegment(startMs: Long, endMs: Long, text: String) {
-                        val trimmed = text.trim()
-                        if (trimmed.isEmpty()) return
-                        translateQueue.put(Segment(startMs, endMs, trimmed, ""))
+                        val t = text.trim()
+                        if (t.isEmpty()) return
+                        translateQueue.put(Segment(startMs, endMs, t, ""))
                     }
                     override fun onProgress(percent: Int) {
                         onProgress(Progress("stt", percent, "인식 중 $percent%"))
                     }
-                    override fun onComplete() {
-                        LogBus.log(TAG, "[3] Whisper 완료 콜백")
-                    }
-                    override fun onLog(msg: String) {
-                        LogBus.log("JNI", msg)
-                    }
+                    override fun onComplete() { LogBus.log(TAG, "STT 완료") }
+                    override fun onLog(msg: String) { LogBus.log("JNI", msg) }
                 }
             )
-        } catch (e: Exception) {
-            LogBus.log(TAG, "[3] 예외: ${e.message}"); false
-        }
+        } catch (e: Exception) { LogBus.log(TAG, "STT 예외: ${e.message}"); false }
 
         translateQueue.put(Segment(0, 0, "__DONE__", ""))
         try { translatorThread.join(3000) } catch (_: Exception) {}
 
         if (!sttOk) {
-            LogBus.log(TAG, "[3] STT 실패")
-            onProgress(Progress("error", 0, "STT 실패")); return@withContext null
+            onProgress(Progress("error", 0, "STT 실패"))
+            return@withContext null
         }
 
-        val finalSegments = synchronized(segmentsLock) { collected.toList() }
+        val finalSegments = synchronized(lock) { collected.toList() }
         LogBus.log(TAG, "[3] 완료: ${finalSegments.size} 세그먼트")
 
-        onProgress(Progress("srt", 0, "자막 저장..."))
         val srtFile = File(AudioPaths.subtitleDir(context), "test_${targetLang}.srt")
         writeSrt(srtFile, finalSegments)
         LogBus.log(TAG, "[4] SRT: ${srtFile.absolutePath}")
 
         onProgress(Progress("done", 100, "완료: ${finalSegments.size} 세그먼트"))
         srtFile
+    }
+
+    private fun guessExt(mime: String?): String = when {
+        mime == null -> "m4a"
+        mime.contains("mp4") || mime.contains("m4a") || mime.contains("aac") -> "m4a"
+        mime.contains("webm") -> "webm"
+        mime.contains("ogg") -> "ogg"
+        mime.contains("mpeg") -> "mp3"
+        else -> "m4a"
     }
 
     private fun copyToCache(context: Context, uri: Uri): File? = try {

@@ -12,8 +12,8 @@ android {
         applicationId = "com.mdkdw1.splayer"
         minSdk = 24
         targetSdk = 34
-        versionCode = 3
-        versionName = "0.4.0"
+        versionCode = 6
+        versionName = "0.6.0"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a")
@@ -34,26 +34,20 @@ android {
     }
 
     buildTypes {
-        release {
-            isMinifyEnabled = false
-        }
+        release { isMinifyEnabled = false }
     }
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
-
     kotlinOptions { jvmTarget = "17" }
 
     buildFeatures {
         compose = true
         buildConfig = true
     }
-
-    composeOptions {
-        kotlinCompilerExtensionVersion = "1.5.14"
-    }
+    composeOptions { kotlinCompilerExtensionVersion = "1.5.14" }
 
     externalNativeBuild {
         cmake {
@@ -64,6 +58,9 @@ android {
 
     packaging {
         resources.excludes += "/META-INF/{AL2.0,LGPL2.1}"
+        resources.excludes += "META-INF/DEPENDENCIES"
+        resources.excludes += "META-INF/LICENSE*"
+        resources.excludes += "META-INF/NOTICE*"
         jniLibs.useLegacyPackaging = true
     }
 }
@@ -87,9 +84,9 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
 
-    // Vosk (기존, 일단 유지 - 나중에 제거)
-    implementation("com.alphacephei:vosk-android:0.3.47@aar")
-    implementation("net.java.dev.jna:jna:5.13.0@aar")
+    // NewPipe Extractor
+    implementation("com.github.TeamNewPipe:NewPipeExtractor:v0.24.5")
+    implementation("com.github.TeamNewPipe:nanojson:1.8.0")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
 }
