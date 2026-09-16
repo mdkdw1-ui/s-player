@@ -44,9 +44,14 @@ object StreamExtractor {
 
             // 오디오 스트림 (최고 비트레이트)
             val audioStreams = extractor.audioStreams
+            // STT 목적: 48~96kbps 우선 (다운로드 절반, 정확도 거의 동일)
             val bestAudio: AudioStream? = audioStreams
                 .filter { it.url != null && it.isUrl }
+                .filter { it.averageBitrate in 48..96 }
                 .maxByOrNull { it.averageBitrate }
+                ?: audioStreams
+                    .filter { it.url != null && it.isUrl }
+                    .minByOrNull { it.averageBitrate }
 
             // 비디오 스트림 (m4a 우선)
             val videoStreams = extractor.videoStreams
