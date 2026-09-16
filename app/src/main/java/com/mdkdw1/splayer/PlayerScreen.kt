@@ -1,5 +1,6 @@
 package com.mdkdw1.splayer
 
+import android.content.Intent
 import android.net.Uri
 import android.webkit.WebView
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -57,6 +58,7 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel()) {
     var logPanelOpen by remember { mutableStateOf(false) }
     var sttPanelOpen by remember { mutableStateOf(false) }
     var moreMenuOpen by remember { mutableStateOf(false) }
+    var cachePanelOpen by remember { mutableStateOf(false) }
 
     val lowVolume = captureOn && rawLevel in 0.0001f..0.005f
     val silence = captureOn && rawLevel <= 0.0001f
@@ -143,6 +145,11 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel()) {
                         DropdownMenuItem(
                             text = { Text("로그") },
                             onClick = { logPanelOpen = !logPanelOpen; moreMenuOpen = false }
+                        )
+                        // 캐시 목록
+                        DropdownMenuItem(
+                            text = { Text("캐시 목록") },
+                            onClick = { cachePanelOpen = true; moreMenuOpen = false }
                         )
                         // 캡처 (실시간, 지금은 스텁)
                         DropdownMenuItem(
@@ -278,6 +285,24 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel()) {
                         Spacer(Modifier.weight(1f))
                         if (!sttState.running && sttState.srtPath != null) {
                             TextButton(onClick = {
+                                // 공유
+                                val f = java.io.File(sttState.srtPath!!)
+                                if (f.exists()) {
+                                    val intent = Intent(Intent.ACTION_SEND).apply {
+                                        type = "application/x-subrip"
+                                        putExtra(Intent.EXTRA_STREAM, androidx.core.content.FileProvider.getUriForFile(
+                                            ctx,
+                                            "${ctx.packageName}.fileprovider",
+                                            f
+                                        ))
+                                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                    }
+                                    ctx.startActivity(Intent.createChooser(intent, "자막 공유"))
+                                }
+                            }) {
+                                Text("공유", fontSize = 12.sp)
+                            }
+                            TextButton(onClick = {
                                 vm.playLastStream()
                                 sttPanelOpen = false
                             }) {
@@ -320,6 +345,75 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel()) {
                     )
                 }
                 SubtitleOverlay(cue = subtitle)
+            }
+        }
+
+        // 캐시 목록 패널
+        if (cachePanelOpen) {
+            val cacheFiles = remember { SubtitleCache.listAll(ctx) }
+            AlertDialog(
+                onDismissRequest = { cachePanelOpen = false },
+                title = { Text("자막 캐시 (${cacheFiles.size})") },
+                text = {
+                    LazyColumn(modifier = Modifier.height(300.dp)) {
+                        items(cacheFiles) { f ->
+                            Row(
+                                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(f.name, fontSize = 11.sp)
+                                    Text("${f.length() / 1024}KB", fontSize = 9.sp, color = Color.Gray)
+                                }
+                                TextButton(onClick = {
+                                    SubtitleCache.delete(ctx, f)
+                                    cachePanelOpen = false
+                                }) {
+                                    Text("삭제", fontSize = 11.sp)
+                                }
+                            }
+                            Divider()
+                        }
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = { SubtitleCache.clearAll(ctx); cachePanelOpen = false }) {
+                        Text("전체 삭제")
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { cachePanelOpen = false }) {
+                        Text("닫기")
+                    }
+                }
+            )
+        }
+
+        // STT 진행 중인데 패널 닫혀 있으면 하단 미니바
+        if (sttState.running && !sttPanelOpen) {
+            Card(
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.primaryContainer
+                ),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 8.dp, vertical = 4.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("[${sttState.stage}] ${sttState.message}", fontSize = 11.sp)
+                        LinearProgressIndicator(
+                            progress = { sttState.percent / 100f },
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+                    TextButton(onClick = { sttPanelOpen = true }) {
+                        Text("보기", fontSize = 11.sp)
+                    }
+                }
             }
         }
 
