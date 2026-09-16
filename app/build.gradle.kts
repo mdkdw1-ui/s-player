@@ -85,8 +85,7 @@ dependencies {
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
 
     // NewPipe Extractor
-    implementation("com.github.TeamNewPipe:NewPipeExtractor:v0.24.5")
-    implementation("com.grack:nanojson:1.8.0")
+    implementation("com.github.TeamNewPipe:NewPipeExtractor:v0.26.5")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
 }
