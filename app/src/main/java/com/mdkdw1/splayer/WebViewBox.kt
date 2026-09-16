@@ -26,7 +26,8 @@ import org.json.JSONArray
 class JsBridge(
     private val onCaption: (String) -> Unit,
     private val onAudioChunk: (FloatArray) -> Unit,
-    private val onVideoFound: (Boolean) -> Unit
+    private val onVideoFound: (Boolean) -> Unit,
+    private val onUrlChanged: (String) -> Unit
 ) {
     @JavascriptInterface
     fun onCaption(text: String) {
@@ -45,27 +46,34 @@ class JsBridge(
     fun onVideoFound(found: Boolean) {
         onVideoFound(found)
     }
+
+    @JavascriptInterface
+    fun onUrlChanged(url: String) {
+        onUrlChanged(url)
+    }
 }
 
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
 fun WebViewBox(
-    url: String,
+    loadUrl: String,
     speed: Float,
     onCaption: (String) -> Unit,
     onAudioChunk: (FloatArray) -> Unit,
     onVideoFound: (Boolean) -> Unit,
+    onUrlChanged: (String) -> Unit,
     onWebViewReady: (WebView) -> Unit,
     modifier: Modifier = Modifier
 ) {
     var progress by remember { mutableIntStateOf(0) }
     var webView by remember { mutableStateOf<WebView?>(null) }
-    var currentUrl by remember { mutableStateOf(url) }
 
-    LaunchedEffect(url) {
-        if (url != currentUrl) {
-            currentUrl = url
-            webView?.loadUrl(url)
+    // loadUrl 값이 바뀔 때만 실제 로드
+    LaunchedEffect(loadUrl) {
+        webView?.let { wv ->
+            if (wv.url != loadUrl) {
+                wv.loadUrl(loadUrl)
+            }
         }
     }
 
@@ -97,12 +105,12 @@ fun WebViewBox(
                         view: WebView?, url: String?, favicon: Bitmap?
                     ) {
                         super.onPageStarted(view, url, favicon)
-                        currentUrl = url ?: currentUrl
+                        url?.let { onUrlChanged(it) }
                     }
 
                     override fun onPageFinished(view: WebView?, url: String?) {
                         super.onPageFinished(view, url)
-                        currentUrl = url ?: currentUrl
+                        url?.let { onUrlChanged(it) }
                         view?.injectAudioCaptureScript()
                     }
 
@@ -111,17 +119,18 @@ fun WebViewBox(
                         request: WebResourceRequest?
                     ): Boolean {
                         val target = request?.url?.toString() ?: return false
+                        onUrlChanged(target)
                         view?.loadUrl(target)
                         return true
                     }
                 }
 
                 wv.addJavascriptInterface(
-                    JsBridge(onCaption, onAudioChunk, onVideoFound),
+                    JsBridge(onCaption, onAudioChunk, onVideoFound, onUrlChanged),
                     "AndroidBridge"
                 )
 
-                wv.loadUrl(url)
+                wv.loadUrl(loadUrl)
                 webView = wv
                 onWebViewReady(wv)
                 wv
