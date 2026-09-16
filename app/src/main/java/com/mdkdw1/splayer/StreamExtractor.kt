@@ -35,17 +35,24 @@ object StreamExtractor {
 
             val title = extractor.name ?: "제목 없음"
             val durationSec = extractor.length
-            val thumbnail = extractor.thumbnailUrl
+            // v0.26.5: thumbnails (복수형), 첫 번째 것 사용
+            val thumbnail: String? = try {
+                extractor.thumbnails.firstOrNull()?.url
+            } catch (e: Exception) { null }
+
             LogBus.log(TAG, "title: $title, duration: ${durationSec}s")
 
+            // 오디오 스트림 (최고 비트레이트)
             val audioStreams = extractor.audioStreams
             val bestAudio: AudioStream? = audioStreams
                 .filter { it.url != null && it.isUrl }
                 .maxByOrNull { it.averageBitrate }
 
+            // 비디오 스트림 (m4a 우선)
             val videoStreams = extractor.videoStreams
             val bestVideo: VideoStream? = videoStreams
-                .filter { it.url != null && it.isUrl && it.getFormat() == VideoStream.MPEG_4 }
+                .filter { it.url != null && it.isUrl }
+                .filter { it.getFormat()?.getName()?.contains("MPEG-4") == true }
                 .maxByOrNull { it.getBitrate() }
                 ?: videoStreams
                     .filter { it.url != null && it.isUrl }
@@ -67,7 +74,7 @@ object StreamExtractor {
                 service = service.serviceInfo.name
             )
 
-            LogBus.log(TAG, "완료: audio=${bestAudio?.averageBitrate}kbps, video=${bestVideo?.getResolution()}")
+            LogBus.log(TAG, "완료: audio=${bestAudio?.averageBitrate}kbps")
             Result.success(result)
 
         } catch (e: Throwable) {
