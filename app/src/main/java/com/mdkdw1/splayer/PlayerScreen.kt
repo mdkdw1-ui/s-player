@@ -1,9 +1,12 @@
 package com.mdkdw1.splayer
 
+import android.webkit.WebView
 import androidx.compose.foundation.layout.*
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
-import androidx.compose.runtime.collectAsState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
@@ -17,33 +20,54 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel()) {
     val subtitle by vm.subtitle.collectAsState()
     val videoUrl by vm.videoUrl.collectAsState()
     val webUrl by vm.webUrl.collectAsState()
+    val videoFound by vm.videoFound.collectAsState()
+
+    var webViewRef by remember { mutableStateOf<WebView?>(null) }
 
     Column(modifier = Modifier.fillMaxSize()) {
-        // TopBar
         TopAppBar(
-            title = { Text("S-Player") },
+            title = {
+                Text(
+                    when {
+                        mode == PlayerMode.WEBVIEW && videoFound -> "S-Player ●"
+                        mode == PlayerMode.WEBVIEW -> "S-Player (웹)"
+                        else -> "S-Player (로컬)"
+                    }
+                )
+            },
+            navigationIcon = {
+                if (mode == PlayerMode.WEBVIEW) {
+                    IconButton(onClick = { webViewRef?.goBack() }) {
+                        Icon(Icons.Default.ArrowBack, contentDescription = "뒤로")
+                    }
+                }
+            },
             actions = {
-                SegmentedButton(
-                    selected = mode == PlayerMode.LOCAL,
-                    onClick = { vm.setMode(PlayerMode.LOCAL) }
+                if (mode == PlayerMode.WEBVIEW) {
+                    IconButton(onClick = { webViewRef?.reload() }) {
+                        Icon(Icons.Default.Refresh, contentDescription = "새로고침")
+                    }
+                }
+                TextButton(
+                    onClick = { vm.setMode(PlayerMode.LOCAL) },
+                    enabled = mode != PlayerMode.LOCAL
                 ) { Text("Local") }
-                Spacer(Modifier.width(8.dp))
-                SegmentedButton(
-                    selected = mode == PlayerMode.WEBVIEW,
-                    onClick = { vm.setMode(PlayerMode.WEBVIEW) }
+                TextButton(
+                    onClick = { vm.setMode(PlayerMode.WEBVIEW) },
+                    enabled = mode != PlayerMode.WEBVIEW
                 ) { Text("Web") }
-                Spacer(Modifier.width(8.dp))
+                Spacer(Modifier.width(4.dp))
             }
         )
 
-        // 배속 컨트롤
+        // 배속 슬라이더
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 8.dp),
+                .padding(horizontal = 16.dp, vertical = 4.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Text("Speed: %.2fx".format(speed))
+            Text("%.2fx".format(speed), style = MaterialTheme.typography.labelMedium)
             Slider(
                 value = speed,
                 onValueChange = { vm.setSpeed(it) },
@@ -53,7 +77,7 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel()) {
                     .weight(1f)
                     .padding(horizontal = 12.dp)
             )
-            Text("4x")
+            Text("4x", style = MaterialTheme.typography.labelMedium)
         }
 
         // 영상 영역 + 오버레이
@@ -66,28 +90,20 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel()) {
                 )
                 PlayerMode.WEBVIEW -> WebViewBox(
                     url = webUrl,
+                    speed = speed,
                     onCaption = { text ->
-                        vm.updateSubtitle(SubtitleCue(original = text, translated = "[번역] $text"))
+                        vm.updateSubtitle(
+                            SubtitleCue(original = text, translated = "[번역] $text")
+                        )
                     },
+                    onAudioChunk = { vm.onAudioChunk(it) },
+                    onVideoFound = { vm.setVideoFound(it) },
+                    onWebViewReady = { webViewRef = it },
                     modifier = Modifier.fillMaxSize()
                 )
             }
 
-            // 자막 오버레이 (최상단)
             SubtitleOverlay(cue = subtitle)
         }
-    }
-}
-
-@Composable
-private fun SegmentedButton(
-    selected: Boolean,
-    onClick: () -> Unit,
-    content: @Composable () -> Unit
-) {
-    if (selected) {
-        Button(onClick = onClick) { content() }
-    } else {
-        OutlinedButton(onClick = onClick) { content() }
     }
 }
