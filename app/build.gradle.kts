@@ -6,17 +6,37 @@ plugins {
 android {
     namespace = "com.mdkdw1.splayer"
     compileSdk = 34
+    ndkVersion = "26.1.10909125"
 
     defaultConfig {
         applicationId = "com.mdkdw1.splayer"
         minSdk = 24
         targetSdk = 34
-        versionCode = 2
-        versionName = "0.3.0"
+        versionCode = 3
+        versionName = "0.4.0"
+
+        ndk {
+            abiFilters += listOf("arm64-v8a", "armeabi-v7a")
+        }
+
+        externalNativeBuild {
+            cmake {
+                cppFlags += listOf("-O3", "-DNDEBUG")
+                arguments += listOf(
+                    "-DWHISPER_BUILD_TESTS=OFF",
+                    "-DWHISPER_BUILD_EXAMPLES=OFF",
+                    "-DWHISPER_BUILD_SERVER=OFF",
+                    "-DGGML_OPENMP=OFF",
+                    "-DANDROID_STL=c++_shared"
+                )
+            }
+        }
     }
 
     buildTypes {
-        release { isMinifyEnabled = false }
+        release {
+            isMinifyEnabled = false
+        }
     }
 
     compileOptions {
@@ -35,9 +55,15 @@ android {
         kotlinCompilerExtensionVersion = "1.5.14"
     }
 
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+            version = "3.22.1"
+        }
+    }
+
     packaging {
         resources.excludes += "/META-INF/{AL2.0,LGPL2.1}"
-        // Vosk native lib 압축 해제 방지
         jniLibs.useLegacyPackaging = true
     }
 }
@@ -59,11 +85,9 @@ dependencies {
     implementation("androidx.media3:media3-common:1.3.1")
 
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
-
-    // 번역만 네트워크 사용
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
 
-    // Vosk (오프라인 STT)
+    // Vosk (기존, 일단 유지 - 나중에 제거)
     implementation("com.alphacephei:vosk-android:0.3.47@aar")
     implementation("net.java.dev.jna:jna:5.13.0@aar")
 
