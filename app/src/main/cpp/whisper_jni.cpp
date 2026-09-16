@@ -16,7 +16,6 @@ static JavaVM *g_vm = nullptr;
 
 JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *) {
     g_vm = vm;
-    LOGI("JNI_OnLoad");
     return JNI_VERSION_1_6;
 }
 
@@ -29,21 +28,17 @@ struct WavData {
 
 static bool read_wav_file(const char *path, WavData &out) {
     FILE *f = fopen(path, "rb");
-    if (!f) { LOGE("WAV 열기 실패: %s", path); return false; }
-
+    if (!f) { LOGE("WAV 열기 실패"); return false; }
     char riff[4]; uint32_t fileSize; char wave[4];
     if (fread(riff, 1, 4, f) != 4 || memcmp(riff, "RIFF", 4) != 0) { fclose(f); return false; }
     if (fread(&fileSize, 4, 1, f) != 1) { fclose(f); return false; }
     if (fread(wave, 1, 4, f) != 4 || memcmp(wave, "WAVE", 4) != 0) { fclose(f); return false; }
-
     int channels = 0, sampleRate = 0, bitsPerSample = 0;
     std::vector<int16_t> pcm;
-
     while (true) {
         char chunkId[4]; uint32_t chunkSize;
         if (fread(chunkId, 1, 4, f) != 4) break;
         if (fread(&chunkSize, 4, 1, f) != 1) break;
-
         if (memcmp(chunkId, "fmt ", 4) == 0) {
             uint16_t audioFormat, numChannels, blockAlign, bps;
             uint32_t sr, byteRate;
@@ -60,17 +55,10 @@ static bool read_wav_file(const char *path, WavData &out) {
             pcm.resize(nSamples);
             fread(pcm.data(), 2, nSamples, f);
             if (chunkSize % 2) fseek(f, 1, SEEK_CUR);
-        } else {
-            fseek(f, chunkSize, SEEK_CUR);
-        }
+        } else fseek(f, chunkSize, SEEK_CUR);
     }
     fclose(f);
-
-    if (channels == 0 || sampleRate == 0 || bitsPerSample != 16 || pcm.empty()) {
-        LOGE("WAV 형식 오류: ch=%d sr=%d bps=%d n=%zu", channels, sampleRate, bitsPerSample, pcm.size());
-        return false;
-    }
-
+    if (channels == 0 || sampleRate == 0 || bitsPerSample != 16 || pcm.empty()) return false;
     out.samples.reserve(pcm.size() / channels);
     for (size_t i = 0; i + channels <= pcm.size(); i += channels) {
         float sum = 0.f;
@@ -78,15 +66,13 @@ static bool read_wav_file(const char *path, WavData &out) {
         out.samples.push_back(sum / channels);
     }
     out.sampleRate = sampleRate; out.channels = channels; out.ok = true;
-    LOGI("WAV 읽음: %zu samples, %d Hz, %d ch", out.samples.size(), sampleRate, channels);
     return true;
 }
 
-// JNI 로그를 Kotlin 콜백으로 전달하는 헬퍼
-static void kotlin_log(JNIEnv *env, jobject callback, jmethodID method, const char *msg) {
-    if (!callback || !method) return;
+static void kotlin_log(JNIEnv *env, jobject cb, jmethodID m, const char *msg) {
+    if (!cb || !m) return;
     jstring jmsg = env->NewStringUTF(msg);
-    env->CallVoidMethod(callback, method, jmsg);
+    env->CallVoidMethod(cb, m, jmsg);
     env->DeleteLocalRef(jmsg);
 }
 
@@ -97,45 +83,43 @@ struct CallbackHolder {
     jmethodID onComplete;
     jmethodID onLog;
     std::mutex mtx;
-    int segments_seen = 0;
+    int total_duration_cs = 0;  // 전체 길이 (centiseconds)
+    int last_progress = 0;
 };
 
-static void new_segment_callback(whisper_context *ctx,
-                                 whisper_state *,
-                                 int n_new,
-                                 void *user_data) {
+static void new_segment_callback(whisper_context *ctx, whisper_state *,
+                                 int n_new, void *user_data) {
     auto *holder = reinterpret_cast<CallbackHolder *>(user_data);
     if (!holder) return;
-
     JNIEnv *env = nullptr;
     bool attached = false;
-    if (g_vm->GetEnv(reinterpret_cast<void **>(&env), JNI_VERSION_1_6) != JNI_OK) {
+    if (g_vm->GetEnv((void **)&env, JNI_VERSION_1_6) != JNI_OK) {
         if (g_vm->AttachCurrentThread(&env, nullptr) != JNI_OK) return;
         attached = true;
     }
-
     std::lock_guard<std::mutex> lock(holder->mtx);
-
     const int n = whisper_full_n_segments(ctx);
-    holder->segments_seen = n;
-    {
-        char buf[128];
-        snprintf(buf, sizeof(buf), "JNI 콜백: n=%d, n_new=%d", n, n_new);
-        kotlin_log(env, holder->callback, holder->onLog, buf);
-    }
 
     for (int i = n - n_new; i < n; i++) {
         const char *text = whisper_full_get_segment_text(ctx, i);
         const int64_t t0 = whisper_full_get_segment_t0(ctx, i);
         const int64_t t1 = whisper_full_get_segment_t1(ctx, i);
-
         jstring jtext = env->NewStringUTF(text ? text : "");
         env->CallVoidMethod(holder->callback, holder->onSegment,
                             (jlong)(t0 * 10), (jlong)(t1 * 10), jtext);
         env->DeleteLocalRef(jtext);
+    }
 
-        int progress = (i + 1) * 100 / (n > 0 ? n : 1);
-        env->CallVoidMethod(holder->callback, holder->onProgress, (jint) progress);
+    // 시간 기반 진행률
+    if (holder->total_duration_cs > 0 && n > 0) {
+        int64_t last_t1 = whisper_full_get_segment_t1(ctx, n - 1);
+        int pct = (int)(last_t1 * 100 / holder->total_duration_cs);
+        if (pct > 99) pct = 99;
+        if (pct < 0) pct = 0;
+        if (pct != holder->last_progress) {
+            holder->last_progress = pct;
+            env->CallVoidMethod(holder->callback, holder->onProgress, (jint) pct);
+        }
     }
 
     if (attached) g_vm->DetachCurrentThread();
@@ -148,50 +132,33 @@ Java_com_mdkdw1_splayer_WhisperBridge_nativeSystemInfo(JNIEnv *env, jobject) {
 }
 
 extern "C" JNIEXPORT jlong JNICALL
-Java_com_mdkdw1_splayer_WhisperBridge_nativeInit(
-        JNIEnv *env, jobject, jstring modelPath) {
+Java_com_mdkdw1_splayer_WhisperBridge_nativeInit(JNIEnv *env, jobject, jstring modelPath) {
     const char *path = env->GetStringUTFChars(modelPath, nullptr);
-    LOGI("nativeInit: %s", path);
     whisper_context_params params = whisper_context_default_params();
     params.use_gpu = false;
     whisper_context *ctx = whisper_init_from_file_with_params(path, params);
     env->ReleaseStringUTFChars(modelPath, path);
-    if (ctx == nullptr) { LOGE("whisper_init 실패"); return 0; }
-    LOGI("whisper_init 성공");
     return reinterpret_cast<jlong>(ctx);
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_mdkdw1_splayer_WhisperBridge_nativeRelease(
-        JNIEnv *, jobject, jlong ctxPtr) {
+Java_com_mdkdw1_splayer_WhisperBridge_nativeRelease(JNIEnv *, jobject, jlong ctxPtr) {
     if (ctxPtr == 0) return;
-    auto *ctx = reinterpret_cast<whisper_context *>(ctxPtr);
-    whisper_free(ctx);
-    LOGI("whisper_free 완료");
+    whisper_free(reinterpret_cast<whisper_context *>(ctxPtr));
 }
 
 extern "C" JNIEXPORT jint JNICALL
 Java_com_mdkdw1_splayer_WhisperBridge_nativeTranscribe(
-        JNIEnv *env, jobject,
-        jlong ctxPtr, jstring wavPath, jstring lang, jint threads, jobject callback) {
+        JNIEnv *env, jobject, jlong ctxPtr, jstring wavPath, jstring lang,
+        jint threads, jobject callback) {
 
-    // 콜백 준비 (로그부터 찍기 위해 먼저)
     jclass cls = env->GetObjectClass(callback);
     jmethodID onLog = env->GetMethodID(cls, "onLog", "(Ljava/lang/String;)V");
-
-    kotlin_log(env, callback, onLog, "JNI: nativeTranscribe 진입");
-
-    if (ctxPtr == 0) { kotlin_log(env, callback, onLog, "JNI: ctxPtr==0"); return -1; }
+    if (ctxPtr == 0) { kotlin_log(env, callback, onLog, "JNI: ctx null"); return -1; }
     auto *ctx = reinterpret_cast<whisper_context *>(ctxPtr);
 
     const char *path = env->GetStringUTFChars(wavPath, nullptr);
     const char *langStr = env->GetStringUTFChars(lang, nullptr);
-
-    {
-        char buf[512];
-        snprintf(buf, sizeof(buf), "JNI: WAV 파싱 시작: %s (lang=%s, threads=%d)", path, langStr, threads);
-        kotlin_log(env, callback, onLog, buf);
-    }
 
     WavData wav;
     if (!read_wav_file(path, wav)) {
@@ -201,10 +168,11 @@ Java_com_mdkdw1_splayer_WhisperBridge_nativeTranscribe(
         return -3;
     }
 
+    int total_cs = (int)(wav.samples.size() * 100 / wav.sampleRate);
     {
         char buf[256];
-        snprintf(buf, sizeof(buf), "JNI: WAV OK %.2f초 %dHz %dch",
-                 (double) wav.samples.size() / wav.sampleRate, wav.sampleRate, wav.channels);
+        snprintf(buf, sizeof(buf), "JNI: WAV OK %.1f초, threads=%d",
+                 (double) wav.samples.size() / wav.sampleRate, threads);
         kotlin_log(env, callback, onLog, buf);
     }
 
@@ -214,9 +182,9 @@ Java_com_mdkdw1_splayer_WhisperBridge_nativeTranscribe(
     holder.onProgress = env->GetMethodID(cls, "onProgress", "(I)V");
     holder.onComplete = env->GetMethodID(cls, "onComplete", "()V");
     holder.onLog = onLog;
+    holder.total_duration_cs = total_cs;
 
     if (!holder.onSegment || !holder.onProgress || !holder.onComplete) {
-        kotlin_log(env, callback, onLog, "JNI: 콜백 메서드 못 찾음");
         env->ReleaseStringUTFChars(wavPath, path);
         env->ReleaseStringUTFChars(lang, langStr);
         env->DeleteGlobalRef(holder.callback);
@@ -231,20 +199,15 @@ Java_com_mdkdw1_splayer_WhisperBridge_nativeTranscribe(
     params.translate = false;
     params.language = langStr;
     params.n_threads = threads > 0 ? threads : 4;
-    params.offset_ms = 0;
     params.no_context = true;
-    params.single_segment = false;
     params.new_segment_callback = new_segment_callback;
     params.new_segment_callback_user_data = &holder;
 
     kotlin_log(env, callback, onLog, "JNI: whisper_full 시작");
-
     int ret = whisper_full(ctx, params, wav.samples.data(), (int) wav.samples.size());
-
     {
         char buf[128];
-        snprintf(buf, sizeof(buf), "JNI: whisper_full 종료 ret=%d, 세그먼트=%d",
-                 ret, whisper_full_n_segments(ctx));
+        snprintf(buf, sizeof(buf), "JNI: whisper_full 종료 ret=%d", ret);
         kotlin_log(env, callback, onLog, buf);
     }
 

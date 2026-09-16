@@ -5,21 +5,23 @@ enum class WhisperModel(
     val displayName: String,
     val url: String,
     val sizeMb: Int,
-    val description: String
+    val description: String,
+    val recommended: Boolean = false
 ) {
     TINY(
         id = "tiny",
         displayName = "Tiny",
         url = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin",
         sizeMb = 75,
-        description = "가장 빠름, 정확도 낮음"
+        description = "가장 빠름, 정확도 낮음",
+        recommended = true
     ),
     BASE(
         id = "base",
         displayName = "Base",
         url = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin",
         sizeMb = 142,
-        description = "권장, 균형"
+        description = "균형"
     ),
     SMALL(
         id = "small",

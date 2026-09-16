@@ -36,7 +36,7 @@ data class SttState(
 )
 
 data class WhisperModelStatus(
-    val model: WhisperModel = WhisperModel.BASE,
+    val model: WhisperModel = WhisperModel.TINY,
     val installed: Boolean = false,
     val downloading: Boolean = false,
     val progress: Float = 0f,
