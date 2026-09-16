@@ -15,11 +15,9 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.BugReport
 import androidx.compose.material.icons.filled.Folder
-import androidx.compose.material.icons.filled.Mic
-import androidx.compose.material.icons.filled.MicOff
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Translate
-import androidx.compose.material.icons.filled.VolumeDown
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -50,7 +48,6 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel()) {
     val rawLevel by vm.rawLevel.collectAsState()
     val outLevel by vm.outLevel.collectAsState()
     val logs by LogBus.lines.collectAsState()
-
     val whisperModel by vm.whisperModel.collectAsState()
     val sttState by vm.sttState.collectAsState()
 
@@ -59,6 +56,7 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel()) {
     var whisperMenuOpen by remember { mutableStateOf(false) }
     var logPanelOpen by remember { mutableStateOf(false) }
     var sttPanelOpen by remember { mutableStateOf(false) }
+    var moreMenuOpen by remember { mutableStateOf(false) }
 
     val lowVolume = captureOn && rawLevel in 0.0001f..0.005f
     val silence = captureOn && rawLevel <= 0.0001f
@@ -68,7 +66,6 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel()) {
         onDenied = { LogBus.log("CAP", "권한 거부됨") }
     )
 
-    // 파일 선택 런처
     val filePicker = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocument()
     ) { uri: Uri? ->
@@ -99,14 +96,14 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel()) {
                 }
             },
             actions = {
-                // 파일 선택 (STT 테스트)
+                // 파일 선택 (STT)
                 IconButton(onClick = {
                     filePicker.launch(arrayOf("audio/*", "video/*"))
                 }) {
                     Icon(Icons.Default.Folder, contentDescription = "파일 STT")
                 }
 
-                // 현재 URL 로 STT
+                // URL STT (Translate)
                 if (urlInput.isNotBlank()) {
                     IconButton(onClick = {
                         vm.runUrlStt(urlInput)
@@ -116,75 +113,82 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel()) {
                     }
                 }
 
-                // Whisper 모델 메뉴
+                // 더보기 메뉴 (나머지 다 여기로)
                 Box {
-                    TextButton(onClick = { whisperMenuOpen = true }) {
-                        Text(whisperModel.model.displayName, fontSize = 12.sp)
+                    IconButton(onClick = { moreMenuOpen = true }) {
+                        Icon(Icons.Default.MoreVert, contentDescription = "더보기")
                     }
                     DropdownMenu(
-                        expanded = whisperMenuOpen,
-                        onDismissRequest = { whisperMenuOpen = false }
+                        expanded = moreMenuOpen,
+                        onDismissRequest = { moreMenuOpen = false }
                     ) {
-                        WhisperModel.values().forEach { m ->
-                            val installed = remember(m) {
-                                WhisperModelDownloader.isInstalled(ctx, m)
+                        // Whisper 모델
+                        DropdownMenuItem(
+                            text = { Text("Whisper: ${whisperModel.model.displayName}") },
+                            onClick = { whisperMenuOpen = true; moreMenuOpen = false }
+                        )
+                        // 언어
+                        DropdownMenuItem(
+                            text = { Text("언어: ${modelStatus.language.displayName}") },
+                            onClick = { langMenuOpen = true; moreMenuOpen = false }
+                        )
+                        // 새로고침
+                        if (mode == PlayerMode.WEBVIEW) {
+                            DropdownMenuItem(
+                                text = { Text("새로고침") },
+                                onClick = { webViewRef?.reload(); moreMenuOpen = false }
+                            )
+                        }
+                        // 로그
+                        DropdownMenuItem(
+                            text = { Text("로그") },
+                            onClick = { logPanelOpen = !logPanelOpen; moreMenuOpen = false }
+                        )
+                        // 캡처 (실시간, 지금은 스텁)
+                        DropdownMenuItem(
+                            text = { Text(if (captureOn) "캡처 중지" else "캡처 시작") },
+                            onClick = {
+                                if (captureOn) vm.stopCapture()
+                                else captureLauncher.launch(buildCaptureIntent(ctx))
+                                moreMenuOpen = false
                             }
-                            DropdownMenuItem(
-                                text = {
-                                    Text("${m.displayName} (${m.sizeMb}MB)${if (installed) " ✓" else ""}")
-                                },
-                                onClick = {
-                                    vm.selectWhisperModel(m)
-                                    whisperMenuOpen = false
-                                }
-                            )
-                        }
+                        )
                     }
-                }
-
-                // STT 패널 토글
-                if (sttState.segments.isNotEmpty() || sttState.running) {
-                    IconButton(onClick = { sttPanelOpen = !sttPanelOpen }) {
-                        Icon(Icons.Default.Translate, contentDescription = "STT")
-                    }
-                }
-
-                // 기존: 시스템 오디오 캡처
-                IconButton(onClick = {
-                    if (captureOn) vm.stopCapture()
-                    else captureLauncher.launch(buildCaptureIntent(ctx))
-                }) {
-                    Icon(
-                        if (captureOn) Icons.Default.Mic else Icons.Default.MicOff,
-                        contentDescription = "시스템 오디오 캡처"
-                    )
-                }
-
-                // 기존: 언어 선택
-                Box {
-                    TextButton(onClick = { langMenuOpen = true }) {
-                        Text(modelStatus.language.displayName, fontSize = 12.sp)
-                    }
-                    DropdownMenu(
-                        expanded = langMenuOpen,
-                        onDismissRequest = { langMenuOpen = false }
-                    ) {
-                        SttLanguage.values().forEach { lang ->
-                            DropdownMenuItem(
-                                text = { Text("${lang.displayName} (${lang.approxMb}MB)") },
-                                onClick = { vm.selectLanguage(lang); langMenuOpen = false }
-                            )
-                        }
-                    }
-                }
-
-                IconButton(onClick = { logPanelOpen = !logPanelOpen }) {
-                    Icon(Icons.Default.BugReport, contentDescription = "로그")
                 }
             }
         )
 
-        // Whisper 모델 미설치 배너
+        // Whisper 모델 선택 서브메뉴
+        DropdownMenu(
+            expanded = whisperMenuOpen,
+            onDismissRequest = { whisperMenuOpen = false }
+        ) {
+            WhisperModel.values().forEach { m ->
+                val installed = remember(m) {
+                    WhisperModelDownloader.isInstalled(ctx, m)
+                }
+                DropdownMenuItem(
+                    text = { Text("${m.displayName} (${m.sizeMb}MB)${if (installed) " ✓" else ""}") },
+                    onClick = { vm.selectWhisperModel(m); whisperMenuOpen = false }
+                )
+            }
+        }
+
+        // 언어 선택 서브메뉴
+        DropdownMenu(
+            expanded = langMenuOpen,
+            onDismissRequest = { langMenuOpen = false }
+        ) {
+            SttLanguage.values().forEach { lang ->
+                DropdownMenuItem(
+                    text = { Text("${lang.displayName} (${lang.approxMb}MB)") },
+                    onClick = { vm.selectLanguage(lang); langMenuOpen = false }
+                )
+            }
+        }
+
+        // 이하 UI는 이전과 동일 (모델 배너, STT 진행률, 주소창, 배속 슬라이더, 영상 영역, 로그 패널)
+        // ... (생략하지 않고 전체 복사)
         if (!whisperModel.installed) {
             Card(
                 colors = CardDefaults.cardColors(
@@ -217,7 +221,6 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel()) {
             }
         }
 
-        // STT 진행률 (실행 중일 때만)
         AnimatedVisibility(visible = sttState.running) {
             Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp)) {
                 LinearProgressIndicator(
@@ -229,7 +232,6 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel()) {
             }
         }
 
-        // 나머지 UI는 기존 그대로 (주소창, 배속 슬라이더, 영상, 로그)
         if (mode == PlayerMode.WEBVIEW && !sttPanelOpen) {
             OutlinedTextField(
                 value = urlInput,
@@ -263,17 +265,12 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel()) {
 
         Box(modifier = Modifier.weight(1f)) {
             if (sttPanelOpen) {
-                // STT 결과 패널
                 Column(modifier = Modifier.fillMaxSize().background(Color(0xFF111111))) {
                     Row(
                         modifier = Modifier.fillMaxWidth().padding(8.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Text(
-                            "STT 결과 (${sttState.segments.size})",
-                            color = Color.White,
-                            fontSize = 13.sp
-                        )
+                        Text("STT 결과 (${sttState.segments.size})", color = Color.White, fontSize = 13.sp)
                         Spacer(Modifier.weight(1f))
                         sttState.srtPath?.let {
                             Text("SRT: ${it.substringAfterLast('/')}", color = Color(0xFFB0FFB0), fontSize = 10.sp)
@@ -285,11 +282,7 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel()) {
                     LazyColumn(modifier = Modifier.fillMaxSize().padding(horizontal = 8.dp)) {
                         items(sttState.segments) { seg ->
                             Column(modifier = Modifier.padding(vertical = 6.dp)) {
-                                Text(
-                                    "[${seg.startMs / 1000}s - ${seg.endMs / 1000}s]",
-                                    color = Color.Gray,
-                                    fontSize = 10.sp
-                                )
+                                Text("[${seg.startMs / 1000}s - ${seg.endMs / 1000}s]", color = Color.Gray, fontSize = 10.sp)
                                 Text(seg.original, color = Color(0xFFB0D0FF), fontSize = 12.sp)
                                 Text(seg.translated, color = Color.White, fontSize = 14.sp)
                             }
@@ -299,17 +292,11 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel()) {
                 }
             } else {
                 when (mode) {
-                    PlayerMode.LOCAL -> ExoPlayerBox(
-                        url = videoUrl,
-                        speed = speed,
-                        modifier = Modifier.fillMaxSize()
-                    )
+                    PlayerMode.LOCAL -> ExoPlayerBox(url = videoUrl, speed = speed, modifier = Modifier.fillMaxSize())
                     PlayerMode.WEBVIEW -> WebViewBox(
                         loadUrl = loadUrl,
                         speed = speed,
-                        onCaption = { text ->
-                            vm.updateSubtitle(SubtitleCue(original = text, translated = "[번역] $text"))
-                        },
+                        onCaption = { text -> vm.updateSubtitle(SubtitleCue(original = text, translated = "[번역] $text")) },
                         onAudioChunk = { vm.onAudioChunk(it) },
                         onVideoFound = { vm.setVideoFound(it) },
                         onUrlChanged = { vm.onWebViewUrlChanged(it) },
@@ -324,10 +311,7 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel()) {
 
         if (logPanelOpen) {
             Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(200.dp)
-                    .background(Color(0xEE111111))
+                modifier = Modifier.fillMaxWidth().height(200.dp).background(Color(0xEE111111))
             ) {
                 Row(
                     modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
@@ -340,13 +324,7 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel()) {
                 }
                 LazyColumn(modifier = Modifier.fillMaxSize().padding(horizontal = 8.dp)) {
                     items(logs) { line ->
-                        Text(
-                            text = line,
-                            color = Color(0xFFB0FFB0),
-                            fontSize = 10.sp,
-                            fontFamily = FontFamily.Monospace,
-                            modifier = Modifier.padding(vertical = 1.dp)
-                        )
+                        Text(line, color = Color(0xFFB0FFB0), fontSize = 10.sp, fontFamily = FontFamily.Monospace, modifier = Modifier.padding(vertical = 1.dp))
                     }
                 }
             }
