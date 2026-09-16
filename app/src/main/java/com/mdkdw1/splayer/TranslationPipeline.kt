@@ -13,7 +13,7 @@ import java.nio.ByteOrder
 class TranslationPipeline(
     context: Context,
     private val language: SttLanguage,
-    private val onResult: (original: String, translated: String, isFinal: Boolean) -> Unit
+    private val onResult: (String, String, Boolean) -> Unit
 ) {
     private val appContext = context.applicationContext
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
@@ -27,7 +27,6 @@ class TranslationPipeline(
     private var chunkCount = 0L
     private var lastLogAt = 0L
 
-    // partial 중복 콜백 방지
     private var lastPartial = ""
 
     init {
@@ -66,7 +65,7 @@ class TranslationPipeline(
                         // partial: 원문만 즉시 표시, 번역은 안 함
                         if (res.text != lastPartial) {
                             lastPartial = res.text
-                            onResult(res.text, "", isFinal = false)
+                            onResult(res.text, "", false)
                         }
                     } else {
                         // final: 번역 수행
@@ -82,7 +81,7 @@ class TranslationPipeline(
                         } else if (language.code != "ko") {
                             LogBus.log("TRANS", "번역 실패/빈결과")
                         }
-                        onResult(text, translated, isFinal = true)
+                        onResult(text, translated, true)
                     }
                 } catch (e: Exception) {
                     LogBus.log("PIPE", "accept 오류 ${e.message}")
