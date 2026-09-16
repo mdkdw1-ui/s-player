@@ -1,6 +1,9 @@
 package com.mdkdw1.splayer
 
+import android.net.Uri
 import android.webkit.WebView
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
@@ -11,9 +14,11 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.BugReport
+import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MicOff
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Translate
 import androidx.compose.material.icons.filled.VolumeDown
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -46,12 +51,15 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel()) {
     val outLevel by vm.outLevel.collectAsState()
     val logs by LogBus.lines.collectAsState()
 
+    val whisperModel by vm.whisperModel.collectAsState()
+    val sttState by vm.sttState.collectAsState()
+
     var webViewRef by remember { mutableStateOf<WebView?>(null) }
     var langMenuOpen by remember { mutableStateOf(false) }
+    var whisperMenuOpen by remember { mutableStateOf(false) }
     var logPanelOpen by remember { mutableStateOf(false) }
+    var sttPanelOpen by remember { mutableStateOf(false) }
 
-    // "볼륨 낮음" 판정: 캡처 중 + 원본 RMS 가 임계 이하 + 실제 소리가 나는 중
-    // 완전 무음과 구분하기 위해 약간의 시간 누적 필요. 여기서는 단순 임계값.
     val lowVolume = captureOn && rawLevel in 0.0001f..0.005f
     val silence = captureOn && rawLevel <= 0.0001f
 
@@ -60,11 +68,22 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel()) {
         onDenied = { LogBus.log("CAP", "권한 거부됨") }
     )
 
+    // 파일 선택 런처
+    val filePicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri: Uri? ->
+        if (uri != null) {
+            vm.runLocalStt(uri)
+            sttPanelOpen = true
+        }
+    }
+
     Column(modifier = Modifier.fillMaxSize()) {
         TopAppBar(
             title = {
                 Text(
                     when {
+                        sttState.running -> "S-Player STT ${sttState.percent}%"
                         captureOn -> "S-Player ●REC"
                         mode == PlayerMode.WEBVIEW && videoFound -> "S-Player ●"
                         mode == PlayerMode.WEBVIEW -> "S-Player (웹)"
@@ -80,21 +99,61 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel()) {
                 }
             },
             actions = {
+                // 파일 선택 (STT 테스트)
+                IconButton(onClick = {
+                    filePicker.launch(arrayOf("audio/*", "video/*"))
+                }) {
+                    Icon(Icons.Default.Folder, contentDescription = "파일 STT")
+                }
+
+                // Whisper 모델 메뉴
+                Box {
+                    TextButton(onClick = { whisperMenuOpen = true }) {
+                        Text(whisperModel.model.displayName, fontSize = 12.sp)
+                    }
+                    DropdownMenu(
+                        expanded = whisperMenuOpen,
+                        onDismissRequest = { whisperMenuOpen = false }
+                    ) {
+                        WhisperModel.values().forEach { m ->
+                            val installed = remember(m) {
+                                WhisperModelDownloader.isInstalled(ctx, m)
+                            }
+                            DropdownMenuItem(
+                                text = {
+                                    Text("${m.displayName} (${m.sizeMb}MB)${if (installed) " ✓" else ""}")
+                                },
+                                onClick = {
+                                    vm.selectWhisperModel(m)
+                                    whisperMenuOpen = false
+                                }
+                            )
+                        }
+                    }
+                }
+
+                // STT 패널 토글
+                if (sttState.segments.isNotEmpty() || sttState.running) {
+                    IconButton(onClick = { sttPanelOpen = !sttPanelOpen }) {
+                        Icon(Icons.Default.Translate, contentDescription = "STT")
+                    }
+                }
+
+                // 기존: 시스템 오디오 캡처
                 IconButton(onClick = {
                     if (captureOn) vm.stopCapture()
                     else captureLauncher.launch(buildCaptureIntent(ctx))
                 }) {
                     Icon(
                         if (captureOn) Icons.Default.Mic else Icons.Default.MicOff,
-                        contentDescription = "시스템 오디오 캡처",
-                        tint = if (captureOn) MaterialTheme.colorScheme.primary
-                               else MaterialTheme.colorScheme.onSurface
+                        contentDescription = "시스템 오디오 캡처"
                     )
                 }
 
+                // 기존: 언어 선택
                 Box {
                     TextButton(onClick = { langMenuOpen = true }) {
-                        Text(modelStatus.language.displayName)
+                        Text(modelStatus.language.displayName, fontSize = 12.sp)
                     }
                     DropdownMenu(
                         expanded = langMenuOpen,
@@ -109,40 +168,37 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel()) {
                     }
                 }
 
-                if (mode == PlayerMode.WEBVIEW) {
-                    IconButton(onClick = { webViewRef?.reload() }) {
-                        Icon(Icons.Default.Refresh, contentDescription = "새로고침")
-                    }
-                }
-
                 IconButton(onClick = { logPanelOpen = !logPanelOpen }) {
                     Icon(Icons.Default.BugReport, contentDescription = "로그")
                 }
             }
         )
 
-        // 모델 미설치 배너
-        if (!modelStatus.installed) {
+        // Whisper 모델 미설치 배너
+        if (!whisperModel.installed) {
             Card(
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.primaryContainer
+                ),
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp)
             ) {
                 Column(modifier = Modifier.padding(12.dp)) {
                     Text(
-                        "${modelStatus.language.displayName} 모델 필요 (${modelStatus.language.approxMb}MB)",
+                        "Whisper ${whisperModel.model.displayName} 모델 필요 (${whisperModel.model.sizeMb}MB)",
                         style = MaterialTheme.typography.bodyMedium
                     )
                     Spacer(Modifier.height(8.dp))
-                    if (modelStatus.downloading) {
+                    if (whisperModel.downloading) {
                         LinearProgressIndicator(
-                            progress = { modelStatus.progress },
+                            progress = { whisperModel.progress },
                             modifier = Modifier.fillMaxWidth()
                         )
                         Spacer(Modifier.height(4.dp))
-                        Text("다운로드 ${(modelStatus.progress * 100).toInt()}%")
+                        Text("다운로드 ${(whisperModel.progress * 100).toInt()}%")
                     } else {
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Button(onClick = { vm.downloadModel() }) { Text("다운로드") }
-                            modelStatus.error?.let {
+                            Button(onClick = { vm.downloadWhisperModel() }) { Text("다운로드") }
+                            whisperModel.error?.let {
                                 Text(it, color = MaterialTheme.colorScheme.error)
                             }
                         }
@@ -151,55 +207,20 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel()) {
             }
         }
 
-        // 저볼륨 경고
-        AnimatedVisibility(visible = lowVolume) {
-            Card(
-                colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.tertiaryContainer
-                ),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 12.dp, vertical = 4.dp)
-            ) {
-                Row(
-                    modifier = Modifier.padding(12.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Icon(Icons.Default.VolumeDown, contentDescription = null)
-                    Spacer(Modifier.width(8.dp))
-                    Column {
-                        Text(
-                            "볼륨이 낮아 인식률이 떨어질 수 있습니다",
-                            style = MaterialTheme.typography.bodyMedium
-                        )
-                        Text(
-                            "rawRms=%.4f → AGC 증폭 중".format(rawLevel),
-                            style = MaterialTheme.typography.labelSmall
-                        )
-                    }
-                }
-            }
-        }
-
-        // 완전 무음 안내
-        AnimatedVisibility(visible = silence) {
-            Card(
-                colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.surfaceVariant
-                ),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 12.dp, vertical = 4.dp)
-            ) {
-                Text(
-                    "무음 구간입니다. 영상을 재생하세요.",
-                    modifier = Modifier.padding(12.dp),
-                    style = MaterialTheme.typography.bodySmall
+        // STT 진행률 (실행 중일 때만)
+        AnimatedVisibility(visible = sttState.running) {
+            Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp)) {
+                LinearProgressIndicator(
+                    progress = { sttState.percent / 100f },
+                    modifier = Modifier.fillMaxWidth()
                 )
+                Spacer(Modifier.height(4.dp))
+                Text("[${sttState.stage}] ${sttState.message}", fontSize = 11.sp)
             }
         }
 
-        if (mode == PlayerMode.WEBVIEW) {
+        // 나머지 UI는 기존 그대로 (주소창, 배속 슬라이더, 영상, 로그)
+        if (mode == PlayerMode.WEBVIEW && !sttPanelOpen) {
             OutlinedTextField(
                 value = urlInput,
                 onValueChange = { vm.onUrlInputChange(it) },
@@ -214,7 +235,6 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel()) {
             )
         }
 
-        // 레벨 미터 + 배속
         Row(
             modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -231,48 +251,65 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel()) {
             Text("4x", style = MaterialTheme.typography.labelMedium)
         }
 
-        // 캡처 중일 때만 레벨 미터
-        AnimatedVisibility(visible = captureOn) {
-            Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 2.dp)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("in ", fontSize = 9.sp, color = Color.Gray)
-                    LinearProgressIndicator(
-                        progress = { rawLevel.coerceIn(0f, 1f) },
-                        modifier = Modifier.weight(1f).height(4.dp)
+        Box(modifier = Modifier.weight(1f)) {
+            if (sttPanelOpen) {
+                // STT 결과 패널
+                Column(modifier = Modifier.fillMaxSize().background(Color(0xFF111111))) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            "STT 결과 (${sttState.segments.size})",
+                            color = Color.White,
+                            fontSize = 13.sp
+                        )
+                        Spacer(Modifier.weight(1f))
+                        sttState.srtPath?.let {
+                            Text("SRT: ${it.substringAfterLast('/')}", color = Color(0xFFB0FFB0), fontSize = 10.sp)
+                        }
+                        TextButton(onClick = { vm.clearStt(); sttPanelOpen = false }) {
+                            Text("닫기", fontSize = 12.sp)
+                        }
+                    }
+                    LazyColumn(modifier = Modifier.fillMaxSize().padding(horizontal = 8.dp)) {
+                        items(sttState.segments) { seg ->
+                            Column(modifier = Modifier.padding(vertical = 6.dp)) {
+                                Text(
+                                    "[${seg.startMs / 1000}s - ${seg.endMs / 1000}s]",
+                                    color = Color.Gray,
+                                    fontSize = 10.sp
+                                )
+                                Text(seg.original, color = Color(0xFFB0D0FF), fontSize = 12.sp)
+                                Text(seg.translated, color = Color.White, fontSize = 14.sp)
+                            }
+                            Divider(color = Color(0xFF333333))
+                        }
+                    }
+                }
+            } else {
+                when (mode) {
+                    PlayerMode.LOCAL -> ExoPlayerBox(
+                        url = videoUrl,
+                        speed = speed,
+                        modifier = Modifier.fillMaxSize()
                     )
-                    Spacer(Modifier.width(8.dp))
-                    Text("out ", fontSize = 9.sp, color = Color.Gray)
-                    LinearProgressIndicator(
-                        progress = { outLevel.coerceIn(0f, 1f) },
-                        modifier = Modifier.weight(1f).height(4.dp),
-                        color = MaterialTheme.colorScheme.primary
+                    PlayerMode.WEBVIEW -> WebViewBox(
+                        loadUrl = loadUrl,
+                        speed = speed,
+                        onCaption = { text ->
+                            vm.updateSubtitle(SubtitleCue(original = text, translated = "[번역] $text"))
+                        },
+                        onAudioChunk = { vm.onAudioChunk(it) },
+                        onVideoFound = { vm.setVideoFound(it) },
+                        onUrlChanged = { vm.onWebViewUrlChanged(it) },
+                        onLog = { vm.onJsLog(it) },
+                        onWebViewReady = { webViewRef = it },
+                        modifier = Modifier.fillMaxSize()
                     )
                 }
+                SubtitleOverlay(cue = subtitle)
             }
-        }
-
-        Box(modifier = Modifier.weight(1f)) {
-            when (mode) {
-                PlayerMode.LOCAL -> ExoPlayerBox(
-                    url = videoUrl,
-                    speed = speed,
-                    modifier = Modifier.fillMaxSize()
-                )
-                PlayerMode.WEBVIEW -> WebViewBox(
-                    loadUrl = loadUrl,
-                    speed = speed,
-                    onCaption = { text ->
-                        vm.updateSubtitle(SubtitleCue(original = text, translated = "[번역] $text"))
-                    },
-                    onAudioChunk = { vm.onAudioChunk(it) },
-                    onVideoFound = { vm.setVideoFound(it) },
-                    onUrlChanged = { vm.onWebViewUrlChanged(it) },
-                    onLog = { vm.onJsLog(it) },
-                    onWebViewReady = { webViewRef = it },
-                    modifier = Modifier.fillMaxSize()
-                )
-            }
-            SubtitleOverlay(cue = subtitle)
         }
 
         if (logPanelOpen) {
@@ -288,12 +325,8 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel()) {
                 ) {
                     Text("로그 (${logs.size})", color = Color.White, fontSize = 12.sp)
                     Spacer(Modifier.weight(1f))
-                    TextButton(onClick = { LogBus.clear() }) {
-                        Text("지우기", fontSize = 12.sp)
-                    }
-                    TextButton(onClick = { logPanelOpen = false }) {
-                        Text("닫기", fontSize = 12.sp)
-                    }
+                    TextButton(onClick = { LogBus.clear() }) { Text("지우기", fontSize = 12.sp) }
+                    TextButton(onClick = { logPanelOpen = false }) { Text("닫기", fontSize = 12.sp) }
                 }
                 LazyColumn(modifier = Modifier.fillMaxSize().padding(horizontal = 8.dp)) {
                     items(logs) { line ->

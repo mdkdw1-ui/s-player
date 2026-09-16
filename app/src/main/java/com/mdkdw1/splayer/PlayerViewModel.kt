@@ -2,6 +2,7 @@ package com.mdkdw1.splayer
 
 import android.app.Application
 import android.content.Intent
+import android.net.Uri
 import android.os.Build
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -25,8 +26,26 @@ data class ModelStatus(
     val error: String? = null
 )
 
+data class SttState(
+    val running: Boolean = false,
+    val stage: String = "",
+    val percent: Int = 0,
+    val message: String = "",
+    val segments: List<SubtitlePipeline.Segment> = emptyList(),
+    val srtPath: String? = null
+)
+
+data class WhisperModelStatus(
+    val model: WhisperModel = WhisperModel.BASE,
+    val installed: Boolean = false,
+    val downloading: Boolean = false,
+    val progress: Float = 0f,
+    val error: String? = null
+)
+
 class PlayerViewModel(app: Application) : AndroidViewModel(app) {
 
+    // ----- 기존 상태 -----
     private val _mode = MutableStateFlow(PlayerMode.WEBVIEW)
     val mode: StateFlow<PlayerMode> = _mode
 
@@ -67,12 +86,16 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
 
     private var pipeline: TranslationPipeline? = null
 
-    // partial 이벤트가 자주 오면 마지막 final 만 유지하는 게 좋지만,
-    // 지금은 단순하게 partial/final 구분만 UI 에 넘김
-    private var lastFinalText = ""
+    // ----- STT / Whisper 관련 상태 (신규) -----
+    private val _whisperModel = MutableStateFlow(WhisperModelStatus())
+    val whisperModel: StateFlow<WhisperModelStatus> = _whisperModel
+
+    private val _sttState = MutableStateFlow(SttState())
+    val sttState: StateFlow<SttState> = _sttState
 
     init {
         refreshModelStatus()
+        refreshWhisperStatus()
         LogBus.log("VM", "init")
 
         AudioCaptureService.onSamples = { samples, rate ->
@@ -82,101 +105,157 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         AudioCaptureService.onLevel = { _outLevel.value = it }
     }
 
-    private fun refreshModelStatus() {
-        val lang = _modelStatus.value.language
-        val installed = ModelDownloader.isInstalled(getApplication(), lang)
-        LogBus.log("VM", "model ${lang.code} installed=$installed")
-        _modelStatus.value = _modelStatus.value.copy(installed = installed, error = null)
-        if (installed) createPipeline(lang)
+    // ================= Whisper 모델 =================
+
+    fun refreshWhisperStatus() {
+        val m = _whisperModel.value.model
+        val installed = WhisperModelDownloader.isInstalled(getApplication(), m)
+        _whisperModel.value = _whisperModel.value.copy(installed = installed, error = null)
+        LogBus.log("VM", "whisper ${m.id} installed=$installed")
     }
 
-    private fun createPipeline(lang: SttLanguage) {
-        pipeline?.close()
-        LogBus.log("VM", "create pipeline lang=${lang.code}")
-        pipeline = TranslationPipeline(getApplication(), lang) { original, translated, isFinal ->
-            _subtitle.value = SubtitleCue(original, translated, isFinal)
-            if (isFinal) {
-                lastFinalText = original
-                LogBus.log("RESULT", "final orig=${original.take(40)} / trans=${translated.take(40)}")
-            }
-        }
-    }
-
-    fun selectLanguage(lang: SttLanguage) {
-        _modelStatus.value = _modelStatus.value.copy(
-            language = lang, progress = 0f, error = null
+    fun selectWhisperModel(model: WhisperModel) {
+        _whisperModel.value = _whisperModel.value.copy(
+            model = model, progress = 0f, error = null
         )
-        refreshModelStatus()
+        refreshWhisperStatus()
     }
 
-    fun downloadModel() {
-        val lang = _modelStatus.value.language
-        if (_modelStatus.value.downloading) return
-        LogBus.log("VM", "download start ${lang.code}")
-        _modelStatus.value = _modelStatus.value.copy(
+    fun downloadWhisperModel() {
+        val m = _whisperModel.value.model
+        if (_whisperModel.value.downloading) return
+        _whisperModel.value = _whisperModel.value.copy(
             downloading = true, progress = 0f, error = null
         )
         viewModelScope.launch {
-            val ok = ModelDownloader.download(getApplication(), lang) { p ->
-                _modelStatus.value = _modelStatus.value.copy(progress = p)
+            val ok = WhisperModelDownloader.download(getApplication(), m) { p ->
+                _whisperModel.value = _whisperModel.value.copy(progress = p)
             }
-            LogBus.log("VM", "download done ok=$ok")
             if (ok) {
-                _modelStatus.value = _modelStatus.value.copy(
+                _whisperModel.value = _whisperModel.value.copy(
                     downloading = false, installed = true, progress = 1f
                 )
-                createPipeline(lang)
             } else {
-                _modelStatus.value = _modelStatus.value.copy(
+                _whisperModel.value = _whisperModel.value.copy(
                     downloading = false, error = "다운로드 실패"
                 )
             }
         }
     }
 
-    fun startCapture(resultCode: Int, data: Intent) {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
-            LogBus.log("CAP", "Android 10 미만은 지원 안 함")
+    // ================= 로컬 파일 STT =================
+
+    fun runLocalStt(uri: Uri) {
+        if (_sttState.value.running) return
+        val model = _whisperModel.value.model
+        if (!_whisperModel.value.installed) {
+            LogBus.log("STT", "모델 미설치")
             return
         }
+
+        _sttState.value = SttState(running = true, stage = "start", percent = 0)
+
+        viewModelScope.launch {
+            val srt = SubtitlePipeline.run(
+                context = getApplication(),
+                sourceUri = uri,
+                model = model,
+                sourceLang = "en",     // 일단 영어 고정. UI에서 바꾸게 확장 가능
+                targetLang = "ko",
+                onProgress = { p ->
+                    _sttState.value = _sttState.value.copy(
+                        stage = p.stage,
+                        percent = p.percent,
+                        message = p.message
+                    )
+                    LogBus.log("STT", "${p.stage} ${p.percent}% ${p.message}")
+                },
+                onSegment = { seg ->
+                    _sttState.value = _sttState.value.copy(
+                        segments = _sttState.value.segments + seg
+                    )
+                    LogBus.log("SEG", "[${seg.startMs}ms] ${seg.original.take(40)} → ${seg.translated.take(40)}")
+                }
+            )
+
+            _sttState.value = _sttState.value.copy(
+                running = false,
+                srtPath = srt?.absolutePath,
+                stage = if (srt != null) "done" else "error"
+            )
+        }
+    }
+
+    fun clearStt() {
+        _sttState.value = SttState()
+    }
+
+    // ================= 기존 캡처/웹 =================
+
+    private fun refreshModelStatus() {
+        val lang = _modelStatus.value.language
+        val installed = ModelDownloader.isInstalled(getApplication(), lang)
+        _modelStatus.value = _modelStatus.value.copy(installed = installed, error = null)
+        if (installed) createPipeline(lang)
+    }
+
+    private fun createPipeline(lang: SttLanguage) {
+        pipeline?.close()
+        pipeline = TranslationPipeline(getApplication(), lang) { original, translated, isFinal ->
+            _subtitle.value = SubtitleCue(original, translated, isFinal)
+        }
+    }
+
+    fun selectLanguage(lang: SttLanguage) {
+        _modelStatus.value = _modelStatus.value.copy(language = lang, progress = 0f, error = null)
+        refreshModelStatus()
+    }
+
+    fun downloadModel() {
+        val lang = _modelStatus.value.language
+        if (_modelStatus.value.downloading) return
+        _modelStatus.value = _modelStatus.value.copy(downloading = true, progress = 0f, error = null)
+        viewModelScope.launch {
+            val ok = ModelDownloader.download(getApplication(), lang) { p ->
+                _modelStatus.value = _modelStatus.value.copy(progress = p)
+            }
+            if (ok) {
+                _modelStatus.value = _modelStatus.value.copy(
+                    downloading = false, installed = true, progress = 1f
+                )
+                createPipeline(lang)
+            } else {
+                _modelStatus.value = _modelStatus.value.copy(downloading = false, error = "다운로드 실패")
+            }
+        }
+    }
+
+    fun startCapture(resultCode: Int, data: Intent) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return
         val ctx = getApplication<Application>()
         val intent = Intent(ctx, AudioCaptureService::class.java).apply {
             putExtra(AudioCaptureService.EXTRA_RESULT_CODE, resultCode)
             putExtra(AudioCaptureService.EXTRA_RESULT_DATA, data)
         }
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            ctx.startForegroundService(intent)
-        } else {
-            ctx.startService(intent)
-        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) ctx.startForegroundService(intent)
+        else ctx.startService(intent)
         _captureOn.value = true
-        LogBus.log("CAP", "start service")
     }
 
     fun stopCapture() {
         val ctx = getApplication<Application>()
         ctx.stopService(Intent(ctx, AudioCaptureService::class.java))
         _captureOn.value = false
-        AudioCaptureService.onSamples = null
-        AudioCaptureService.onRawLevel = null
-        AudioCaptureService.onLevel = null
         _rawLevel.value = 0f
         _outLevel.value = 0f
-        _subtitle.value = SubtitleCue()
-        LogBus.log("CAP", "stop service")
     }
 
     fun setMode(m: PlayerMode) { _mode.value = m }
     fun setSpeed(s: Float) { _speed.value = s.coerceIn(0.25f, 4.0f) }
     fun updateSubtitle(cue: SubtitleCue) { _subtitle.value = cue }
     fun setVideoUrl(url: String) { _videoUrl.value = url }
-    fun setVideoFound(found: Boolean) {
-        LogBus.log("VM", "videoFound=$found")
-        _videoFound.value = found
-    }
-
+    fun setVideoFound(found: Boolean) { _videoFound.value = found }
     fun onUrlInputChange(text: String) { _urlInput.value = text }
-
     fun onJsLog(msg: String) { LogBus.log("JS", msg) }
 
     fun navigateToInput() {
@@ -186,7 +265,6 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
             target = if (target.contains(".") && !target.contains(" ")) "https://$target"
             else "https://www.google.com/search?q=" + java.net.URLEncoder.encode(target, "UTF-8")
         }
-        LogBus.log("VM", "navigate $target")
         _loadUrl.value = target
         _currentUrl.value = target
         _urlInput.value = target
@@ -207,7 +285,5 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         pipeline?.close()
         pipeline = null
         AudioCaptureService.onSamples = null
-        AudioCaptureService.onRawLevel = null
-        AudioCaptureService.onLevel = null
     }
 }
