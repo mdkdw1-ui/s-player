@@ -21,6 +21,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.viewinterop.AndroidView
+import kotlinx.coroutines.delay
 import org.json.JSONArray
 
 class JsBridge(
@@ -30,8 +31,7 @@ class JsBridge(
     private val onUrlChanged: (String) -> Unit,
     private val onLog: (String) -> Unit
 ) {
-    @JavascriptInterface
-    fun onCaption(text: String) { onCaption(text) }
+    @JavascriptInterface fun onCaption(text: String) { onCaption(text) }
 
     @JavascriptInterface
     fun onAudio(dataJson: String) {
@@ -41,14 +41,9 @@ class JsBridge(
         onAudioChunk(out)
     }
 
-    @JavascriptInterface
-    fun onVideoFound(found: Boolean) { onVideoFound(found) }
-
-    @JavascriptInterface
-    fun onUrlChanged(url: String) { onUrlChanged(url) }
-
-    @JavascriptInterface
-    fun onLog(msg: String) { onLog(msg) }
+    @JavascriptInterface fun onVideoFound(found: Boolean) { onVideoFound(found) }
+    @JavascriptInterface fun onUrlChanged(url: String) { onUrlChanged(url) }
+    @JavascriptInterface fun onLog(msg: String) { onLog(msg) }
 }
 
 @SuppressLint("SetJavaScriptEnabled")
@@ -66,6 +61,7 @@ fun WebViewBox(
 ) {
     var progress by remember { mutableIntStateOf(0) }
     var webView by remember { mutableStateOf<WebView?>(null) }
+    var pageGeneration by remember { mutableIntStateOf(0) }
 
     LaunchedEffect(loadUrl) {
         webView?.let { wv -> if (wv.url != loadUrl) wv.loadUrl(loadUrl) }
@@ -73,6 +69,20 @@ fun WebViewBox(
 
     LaunchedEffect(speed, webView) {
         webView?.applyPlaybackSpeed(speed)
+    }
+
+    // 새 페이지 로드될 때마다 주입 재시도 (1초 x 10회)
+    LaunchedEffect(pageGeneration, webView) {
+        val wv = webView ?: return@LaunchedEffect
+        repeat(10) { i ->
+            delay(1000)
+            try {
+                wv.injectAudioCaptureScript()
+                onLog("re-inject #${i + 1}")
+            } catch (e: Exception) {
+                onLog("re-inject fail: ${e.message}")
+            }
+        }
     }
 
     Box(modifier = modifier) {
@@ -91,6 +101,15 @@ fun WebViewBox(
                     override fun onProgressChanged(view: WebView?, newProgress: Int) {
                         progress = newProgress
                     }
+                    override fun onConsoleMessage(
+                        consoleMessage: android.webkit.ConsoleMessage?
+                    ): Boolean {
+                        val msg = consoleMessage?.message() ?: return false
+                        if (msg.contains("[SPlayer]")) {
+                            onLog("console: $msg")
+                        }
+                        return true
+                    }
                 }
 
                 wv.webViewClient = object : WebViewClient() {
@@ -98,6 +117,7 @@ fun WebViewBox(
                         super.onPageStarted(view, url, favicon)
                         url?.let { onUrlChanged(it) }
                         onLog("page started: $url")
+                        pageGeneration++
                     }
 
                     override fun onPageFinished(view: WebView?, url: String?) {
