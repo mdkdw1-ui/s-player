@@ -5,6 +5,8 @@ import android.net.Uri
 import android.util.Log
 import com.mdkdw1.splayer.audio.AudioDecoder
 import com.mdkdw1.splayer.audio.AudioPaths
+import com.mdkdw1.splayer.audio.StreamingDataSource
+import com.mdkdw1.splayer.audio.StreamingSource
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -39,13 +41,19 @@ object SubtitlePipeline {
         LogBus.log(TAG, "=== 로컬 START")
         onProgress(Progress("copy", 0, "파일 복사 중..."))
         val inputFile = copyToCache(context, sourceUri)
-            ?: run {
-                onProgress(Progress("error", 0, "파일 복사 실패"))
-                return null
-            }
-        LogBus.log(TAG, "[1] 복사: ${inputFile.length()} bytes")
+            ?: run { onProgress(Progress("error", 0, "파일 복사 실패")); return null }
         onProgress(Progress("copy", 100, "복사 완료"))
-        return processAudioFile(context, inputFile, model, sourceLang, targetLang, onProgress, onSegment)
+
+        onProgress(Progress("decode", 0, "오디오 디코딩 중..."))
+        val wavFile = AudioPaths.tempWav(context, "test")
+        if (wavFile.exists()) wavFile.delete()
+        val ok = try { AudioDecoder.decodeToWav(inputFile, wavFile) }
+        catch (e: Exception) { LogBus.log(TAG, "디코딩 예외: ${e.message}"); false }
+        if (!ok || !wavFile.exists()) {
+            onProgress(Progress("error", 0, "디코딩 실패")); return null
+        }
+        onProgress(Progress("decode", 100, "디코딩 완료"))
+        return runWhisperAndSrt(context, wavFile, model, sourceLang, targetLang, onProgress, onSegment)
     }
 
     // ================== URL ==================
@@ -61,52 +69,82 @@ object SubtitlePipeline {
     ): File? {
         LogBus.log(TAG, "=== URL START: $url")
 
-        // ---------- 캐시 확인 ----------
+        // 캐시 확인
         if (SubtitleCache.exists(context, url, targetLang)) {
             LogBus.log(TAG, "캐시 히트!")
             onProgress(Progress("cache", 100, "캐시된 자막 로드"))
             val srt = SubtitleCache.read(context, url, targetLang)
             if (srt != null) {
-                val segs = SubtitleCache.parseSrt(srt)
-                segs.forEach { onSegment(it) }
-                // 캐시 파일을 그대로 반환
+                SubtitleCache.parseSrt(srt).forEach { onSegment(it) }
                 return SubtitleCache.srtFile(context, url, targetLang)
             }
         }
 
+        // 1. 스트림 추출
         onProgress(Progress("extract", 0, "영상 정보 추출 중..."))
         val info = StreamExtractor.extract(url).getOrNull()
         if (info == null) {
-            onProgress(Progress("error", 0, "스트림 추출 실패"))
-            return null
+            onProgress(Progress("error", 0, "스트림 추출 실패")); return null
         }
         onStreamInfo(info)
         onProgress(Progress("extract", 100, "${info.title} (${info.durationSec}s)"))
 
         val audioUrl = info.audioUrl ?: info.videoUrl
         if (audioUrl == null) {
-            onProgress(Progress("error", 0, "오디오 스트림 없음"))
-            return null
+            onProgress(Progress("error", 0, "오디오 스트림 없음")); return null
         }
-        val ext = guessExt(info.audioMimeType ?: info.videoMimeType)
 
-        onProgress(Progress("download", 0, "오디오 다운로드 중..."))
-        val audioFile = StreamDownloader.download(context, audioUrl, "url_input", ext) { p ->
-            onProgress(Progress("download", (p * 100).toInt(), "다운로드 ${(p*100).toInt()}%"))
-        }
-        if (audioFile == null) {
-            onProgress(Progress("error", 0, "다운로드 실패"))
-            return null
-        }
-        onProgress(Progress("download", 100, "다운로드 완료"))
+        // 2. 스트리밍 다운로드 + 디코딩 병렬
+        onProgress(Progress("download", 0, "스트리밍 시작..."))
+        LogBus.log(TAG, "스트리밍 다운로드+디코딩 병렬")
 
-        return processAudioFile(context, audioFile, model, sourceLang, targetLang, onProgress, onSegment, cacheSourceKey = url)
+        val streaming = StreamingSource(audioUrl)
+        streaming.start()
+
+        val monitorThread = Thread {
+            while (!streaming.downloadComplete) {
+                val total = streaming.totalSize
+                val done = streaming.downloadedBytes
+                if (total > 0) {
+                    val pct = (done * 100 / total).toInt()
+                    onProgress(Progress("download", pct, "다운로드 $pct%"))
+                }
+                try { Thread.sleep(500) } catch (_: Exception) { break }
+            }
+        }
+        monitorThread.isDaemon = true
+        monitorThread.start()
+
+        onProgress(Progress("decode", 0, "스트리밍 디코딩..."))
+        val wavFile = AudioPaths.tempWav(context, "test_stream")
+        if (wavFile.exists()) wavFile.delete()
+
+        val dataSource = StreamingDataSource(streaming)
+        val decodeOk = try {
+            AudioDecoder.decodeToWavFromSource(dataSource, wavFile)
+        } catch (e: Exception) {
+            LogBus.log(TAG, "스트리밍 디코딩 예외: ${e.message}"); false
+        }
+
+        if (streaming.downloadError != null) {
+            streaming.close()
+            onProgress(Progress("error", 0, "다운로드 실패: ${streaming.downloadError}")); return null
+        }
+        if (!decodeOk || !wavFile.exists()) {
+            streaming.close()
+            onProgress(Progress("error", 0, "디코딩 실패")); return null
+        }
+        LogBus.log(TAG, "WAV: ${wavFile.length()} bytes")
+        onProgress(Progress("decode", 100, "디코딩 완료"))
+        streaming.close()
+
+        return runWhisperAndSrt(context, wavFile, model, sourceLang, targetLang, onProgress, onSegment, cacheSourceKey = url)
     }
 
-    // ================== 공통 ==================
-    private suspend fun processAudioFile(
+    // ================== 공통: Whisper + 번역 + SRT ==================
+    private suspend fun runWhisperAndSrt(
         context: Context,
-        inputFile: File,
+        wavFile: File,
         model: WhisperModel,
         sourceLang: String,
         targetLang: String,
@@ -115,34 +153,19 @@ object SubtitlePipeline {
         cacheSourceKey: String? = null
     ): File? = withContext(Dispatchers.IO) {
 
-        onProgress(Progress("decode", 0, "오디오 디코딩 중..."))
-        val wavFile = AudioPaths.tempWav(context, "test")
-        if (wavFile.exists()) wavFile.delete()
-
-        val decodeOk = try { AudioDecoder.decodeToWav(inputFile, wavFile) }
-        catch (e: Exception) { LogBus.log(TAG, "디코딩 예외: ${e.message}"); false }
-
-        if (!decodeOk || !wavFile.exists()) {
-            onProgress(Progress("error", 0, "디코딩 실패"))
-            return@withContext null
-        }
-        LogBus.log(TAG, "[2] WAV: ${wavFile.length()} bytes")
-        onProgress(Progress("decode", 100, "디코딩 완료"))
-
         if (!WhisperModelDownloader.isInstalled(context, model)) {
-            onProgress(Progress("error", 0, "모델 미설치"))
-            return@withContext null
+            onProgress(Progress("error", 0, "모델 미설치")); return@withContext null
         }
         val modelPath = WhisperModelDownloader.modelFile(context, model).absolutePath
 
         val collected = mutableListOf<Segment>()
         val translator = GoogleTranslator()
-        val translateQueue = java.util.concurrent.LinkedBlockingQueue<Segment>()
+        val queue = java.util.concurrent.LinkedBlockingQueue<Segment>()
         val lock = Object()
 
         val translatorThread = Thread {
             while (true) {
-                val seg = try { translateQueue.take() } catch (e: Exception) { break }
+                val seg = try { queue.take() } catch (e: Exception) { break }
                 if (seg.original == "__DONE__") break
                 val translated = try {
                     if (targetLang == sourceLang) seg.original
@@ -157,8 +180,8 @@ object SubtitlePipeline {
         translatorThread.start()
 
         onProgress(Progress("stt", 0, "음성 인식 중..."))
-
         val threads = Runtime.getRuntime().availableProcessors().coerceAtMost(8)
+
         val sttOk = try {
             WhisperBridge.transcribe(
                 modelPath = modelPath,
@@ -169,33 +192,31 @@ object SubtitlePipeline {
                     override fun onSegment(startMs: Long, endMs: Long, text: String) {
                         val t = text.trim()
                         if (t.isEmpty()) return
-                        translateQueue.put(Segment(startMs, endMs, t, ""))
+                        queue.put(Segment(startMs, endMs, t, ""))
                     }
                     override fun onProgress(percent: Int) {
                         onProgress(Progress("stt", percent, "인식 중 $percent%"))
                     }
-                    override fun onComplete() { LogBus.log(TAG, "STT 완료") }
+                    override fun onComplete() {}
                     override fun onLog(msg: String) { LogBus.log("JNI", msg) }
                 }
             )
         } catch (e: Exception) { LogBus.log(TAG, "STT 예외: ${e.message}"); false }
 
-        translateQueue.put(Segment(0, 0, "__DONE__", ""))
+        queue.put(Segment(0, 0, "__DONE__", ""))
         try { translatorThread.join(3000) } catch (_: Exception) {}
 
         if (!sttOk) {
-            onProgress(Progress("error", 0, "STT 실패"))
-            return@withContext null
+            onProgress(Progress("error", 0, "STT 실패")); return@withContext null
         }
 
         val finalSegments = synchronized(lock) { collected.toList() }
-        LogBus.log(TAG, "[3] 완료: ${finalSegments.size} 세그먼트")
+        LogBus.log(TAG, "완료: ${finalSegments.size} 세그먼트")
 
         val srtFile = File(AudioPaths.subtitleDir(context), "test_${targetLang}.srt")
         writeSrt(srtFile, finalSegments)
-        LogBus.log(TAG, "[4] SRT: ${srtFile.absolutePath}")
+        LogBus.log(TAG, "SRT: ${srtFile.absolutePath}")
 
-        // 캐시에도 저장 (URL 기반일 때)
         if (cacheSourceKey != null) {
             SubtitleCache.write(context, cacheSourceKey, targetLang, srtFile.readText())
         }
@@ -204,15 +225,7 @@ object SubtitlePipeline {
         srtFile
     }
 
-    private fun guessExt(mime: String?): String = when {
-        mime == null -> "m4a"
-        mime.contains("mp4") || mime.contains("m4a") || mime.contains("aac") -> "m4a"
-        mime.contains("webm") -> "webm"
-        mime.contains("ogg") -> "ogg"
-        mime.contains("mpeg") -> "mp3"
-        else -> "m4a"
-    }
-
+    // ================== 유틸 ==================
     private fun copyToCache(context: Context, uri: Uri): File? = try {
         val name = queryFileName(context, uri) ?: "input_${System.currentTimeMillis()}"
         val ext = name.substringAfterLast('.', "bin")
