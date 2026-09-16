@@ -5,7 +5,6 @@ import android.util.Log
 import org.json.JSONObject
 import org.vosk.Model
 import org.vosk.Recognizer
-import java.io.File
 
 class VoskStt(
     private val context: Context,
@@ -14,6 +13,11 @@ class VoskStt(
 ) {
     private var model: Model? = null
     private var recognizer: Recognizer? = null
+
+    data class Result(
+        val text: String,
+        val isFinal: Boolean
+    )
 
     fun initialize(): Boolean {
         if (model != null) return true
@@ -33,11 +37,20 @@ class VoskStt(
         }
     }
 
-    fun acceptWaveform(pcm16: ByteArray): String {
-        val rec = recognizer ?: return ""
-        return if (rec.acceptWaveForm(pcm16, pcm16.size)) {
-            JSONObject(rec.result).optString("text", "").trim()
-        } else ""
+    fun acceptWaveform(pcm16: ByteArray): Result? {
+        val rec = recognizer ?: return null
+        return try {
+            if (rec.acceptWaveForm(pcm16, pcm16.size)) {
+                val text = JSONObject(rec.result).optString("text", "").trim()
+                if (text.isBlank()) null else Result(text, isFinal = true)
+            } else {
+                val partial = JSONObject(rec.partialResult).optString("partial", "").trim()
+                if (partial.isBlank()) null else Result(partial, isFinal = false)
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "accept 예외", e)
+            null
+        }
     }
 
     fun finish(): String {

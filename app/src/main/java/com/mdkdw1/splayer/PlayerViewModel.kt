@@ -13,7 +13,8 @@ enum class PlayerMode { LOCAL, WEBVIEW }
 
 data class SubtitleCue(
     val original: String = "",
-    val translated: String = ""
+    val translated: String = "",
+    val isFinal: Boolean = false
 )
 
 data class ModelStatus(
@@ -44,11 +45,9 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     private val _captureOn = MutableStateFlow(false)
     val captureOn: StateFlow<Boolean> = _captureOn
 
-    // 원본 RMS (증폭 전). UI에서 "볼륨 낮음" 경고에 사용
     private val _rawLevel = MutableStateFlow(0f)
     val rawLevel: StateFlow<Float> = _rawLevel
 
-    // 증폭 후 RMS (STT에 들어가는 신호 세기)
     private val _outLevel = MutableStateFlow(0f)
     val outLevel: StateFlow<Float> = _outLevel
 
@@ -68,6 +67,10 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
 
     private var pipeline: TranslationPipeline? = null
 
+    // partial 이벤트가 자주 오면 마지막 final 만 유지하는 게 좋지만,
+    // 지금은 단순하게 partial/final 구분만 UI 에 넘김
+    private var lastFinalText = ""
+
     init {
         refreshModelStatus()
         LogBus.log("VM", "init")
@@ -75,12 +78,8 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         AudioCaptureService.onSamples = { samples, rate ->
             pipeline?.push(samples, sampleRate = rate)
         }
-        AudioCaptureService.onRawLevel = { rms ->
-            _rawLevel.value = rms
-        }
-        AudioCaptureService.onLevel = { rms ->
-            _outLevel.value = rms
-        }
+        AudioCaptureService.onRawLevel = { _rawLevel.value = it }
+        AudioCaptureService.onLevel = { _outLevel.value = it }
     }
 
     private fun refreshModelStatus() {
@@ -94,9 +93,12 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     private fun createPipeline(lang: SttLanguage) {
         pipeline?.close()
         LogBus.log("VM", "create pipeline lang=${lang.code}")
-        pipeline = TranslationPipeline(getApplication(), lang) { original, translated ->
-            LogBus.log("RESULT", "orig=${original.take(40)} / trans=${translated.take(40)}")
-            _subtitle.value = SubtitleCue(original = original, translated = translated)
+        pipeline = TranslationPipeline(getApplication(), lang) { original, translated, isFinal ->
+            _subtitle.value = SubtitleCue(original, translated, isFinal)
+            if (isFinal) {
+                lastFinalText = original
+                LogBus.log("RESULT", "final orig=${original.take(40)} / trans=${translated.take(40)}")
+            }
         }
     }
 
@@ -160,6 +162,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         AudioCaptureService.onLevel = null
         _rawLevel.value = 0f
         _outLevel.value = 0f
+        _subtitle.value = SubtitleCue()
         LogBus.log("CAP", "stop service")
     }
 
