@@ -12,12 +12,11 @@ object WhisperBridge {
         LogBus.log(TAG, "라이브러리 로드 완료")
     }
 
-    data class Segment(val startMs: Long, val endMs: Long, val text: String)
-
     interface SegmentCallback {
         fun onSegment(startMs: Long, endMs: Long, text: String)
         fun onProgress(percent: Int)
         fun onComplete()
+        fun onLog(msg: String)
     }
 
     external fun nativeSystemInfo(): String
@@ -31,12 +30,6 @@ object WhisperBridge {
         callback: SegmentCallback
     ): Int
 
-    fun systemInfo(): String = try {
-        nativeSystemInfo().also { LogBus.log(TAG, "sys: $it") }
-    } catch (e: Throwable) {
-        Log.e(TAG, "systemInfo 실패", e); "unknown"
-    }
-
     suspend fun transcribe(
         modelPath: String,
         wavPath: String,
@@ -45,22 +38,18 @@ object WhisperBridge {
         callback: SegmentCallback
     ): Boolean = withContext(Dispatchers.Default) {
         LogBus.log(TAG, "init 시작 (threads=$threads)")
-
         val ctx = try {
             nativeInit(modelPath)
         } catch (e: Throwable) {
             LogBus.log(TAG, "nativeInit 예외: ${e.message}")
             0L
         }
-
         if (ctx == 0L) {
             LogBus.log(TAG, "모델 로드 실패")
             return@withContext false
         }
-        LogBus.log(TAG, "init 완료 ctx=$ctx")
-
+        LogBus.log(TAG, "init 완료")
         try {
-            LogBus.log(TAG, "transcribe 시작")
             val ret = nativeTranscribe(ctx, wavPath, language, threads, callback)
             LogBus.log(TAG, "transcribe 종료 ret=$ret")
             ret == 0
