@@ -86,6 +86,10 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
 
     private var pipeline: TranslationPipeline? = null
 
+    // URL STT 결과로 얻은 스트림 정보 (재생용)
+    private val _lastStreamInfo = MutableStateFlow<StreamResult?>(null)
+    val lastStreamInfo: StateFlow<StreamResult?> = _lastStreamInfo
+
     // ----- STT / Whisper 관련 상태 (신규) -----
     private val _whisperModel = MutableStateFlow(WhisperModelStatus())
     val whisperModel: StateFlow<WhisperModelStatus> = _whisperModel
@@ -216,6 +220,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
                 },
                 onStreamInfo = { info ->
                     LogBus.log("URL", "제목: ${info.title}, ${info.durationSec}초")
+                    _lastStreamInfo.value = info
                 }
             )
 
@@ -225,6 +230,14 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
                 stage = if (srt != null) "done" else "error"
             )
         }
+    }
+
+    fun playLastStream() {
+        val info = _lastStreamInfo.value ?: return
+        val playUrl = info.videoUrl ?: return
+        LogBus.log("VM", "재생 시작: ${playUrl.take(60)}")
+        _videoUrl.value = playUrl
+        _mode.value = PlayerMode.LOCAL
     }
 
     fun clearStt() {

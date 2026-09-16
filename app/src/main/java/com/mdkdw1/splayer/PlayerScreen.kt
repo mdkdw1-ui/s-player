@@ -272,8 +272,13 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel()) {
                     ) {
                         Text("STT 결과 (${sttState.segments.size})", color = Color.White, fontSize = 13.sp)
                         Spacer(Modifier.weight(1f))
-                        sttState.srtPath?.let {
-                            Text("SRT: ${it.substringAfterLast('/')}", color = Color(0xFFB0FFB0), fontSize = 10.sp)
+                        if (!sttState.running && sttState.srtPath != null) {
+                            TextButton(onClick = {
+                                vm.playLastStream()
+                                sttPanelOpen = false
+                            }) {
+                                Text("▶ 재생", fontSize = 12.sp)
+                            }
                         }
                         TextButton(onClick = { vm.clearStt(); sttPanelOpen = false }) {
                             Text("닫기", fontSize = 12.sp)
@@ -292,7 +297,12 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel()) {
                 }
             } else {
                 when (mode) {
-                    PlayerMode.LOCAL -> ExoPlayerBox(url = videoUrl, speed = speed, modifier = Modifier.fillMaxSize())
+                    PlayerMode.LOCAL -> ExoPlayerBox(
+                        url = videoUrl,
+                        speed = speed,
+                        subtitleFile = sttState.srtPath?.let { java.io.File(it) },
+                        modifier = Modifier.fillMaxSize()
+                    )
                     PlayerMode.WEBVIEW -> WebViewBox(
                         loadUrl = loadUrl,
                         speed = speed,
