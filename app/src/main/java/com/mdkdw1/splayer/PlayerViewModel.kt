@@ -6,6 +6,7 @@ import android.net.Uri
 import android.os.Build
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
@@ -45,7 +46,7 @@ data class WhisperModelStatus(
 
 class PlayerViewModel(app: Application) : AndroidViewModel(app) {
 
-    // ----- 기존 상태 -----
+    // ----- 모드/재생 -----
     private val _mode = MutableStateFlow(PlayerMode.WEBVIEW)
     val mode: StateFlow<PlayerMode> = _mode
 
@@ -57,9 +58,6 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
 
     private val _videoFound = MutableStateFlow(false)
     val videoFound: StateFlow<Boolean> = _videoFound
-
-    private val _modelStatus = MutableStateFlow(ModelStatus())
-    val modelStatus: StateFlow<ModelStatus> = _modelStatus
 
     private val _captureOn = MutableStateFlow(false)
     val captureOn: StateFlow<Boolean> = _captureOn
@@ -84,18 +82,24 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     private val _loadUrl = MutableStateFlow(_currentUrl.value)
     val loadUrl: StateFlow<String> = _loadUrl
 
-    private var pipeline: TranslationPipeline? = null
+    private val _modelStatus = MutableStateFlow(ModelStatus())
+    val modelStatus: StateFlow<ModelStatus> = _modelStatus
 
-    // URL STT 결과로 얻은 스트림 정보 (재생용)
-    private val _lastStreamInfo = MutableStateFlow<StreamResult?>(null)
-    val lastStreamInfo: StateFlow<StreamResult?> = _lastStreamInfo
-
-    // ----- STT / Whisper 관련 상태 (신규) -----
     private val _whisperModel = MutableStateFlow(WhisperModelStatus())
     val whisperModel: StateFlow<WhisperModelStatus> = _whisperModel
 
     private val _sttState = MutableStateFlow(SttState())
     val sttState: StateFlow<SttState> = _sttState
+
+    private val _lastStreamInfo = MutableStateFlow<StreamResult?>(null)
+    val lastStreamInfo: StateFlow<StreamResult?> = _lastStreamInfo
+
+    private var pipeline: TranslationPipeline? = null
+
+    // 세그먼트를 임시로 모으는 버퍼 (매번 StateFlow 갱신 방지)
+    private val segmentBuffer = mutableListOf<SubtitlePipeline.Segment>()
+    private var lastEmitAt = 0L
+    private val emitThrottleMs = 300L
 
     init {
         refreshModelStatus()
@@ -109,79 +113,81 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         AudioCaptureService.onLevel = { _outLevel.value = it }
     }
 
-    // ================= Whisper 모델 =================
-
+    // ============ Whisper 모델 ============
     fun refreshWhisperStatus() {
         val m = _whisperModel.value.model
         val installed = WhisperModelDownloader.isInstalled(getApplication(), m)
         _whisperModel.value = _whisperModel.value.copy(installed = installed, error = null)
-        LogBus.log("VM", "whisper ${m.id} installed=$installed")
     }
 
     fun selectWhisperModel(model: WhisperModel) {
-        _whisperModel.value = _whisperModel.value.copy(
-            model = model, progress = 0f, error = null
-        )
+        _whisperModel.value = _whisperModel.value.copy(model = model, progress = 0f, error = null)
         refreshWhisperStatus()
     }
 
     fun downloadWhisperModel() {
         val m = _whisperModel.value.model
         if (_whisperModel.value.downloading) return
-        _whisperModel.value = _whisperModel.value.copy(
-            downloading = true, progress = 0f, error = null
-        )
+        _whisperModel.value = _whisperModel.value.copy(downloading = true, progress = 0f, error = null)
         viewModelScope.launch {
             val ok = WhisperModelDownloader.download(getApplication(), m) { p ->
                 _whisperModel.value = _whisperModel.value.copy(progress = p)
             }
             if (ok) {
-                _whisperModel.value = _whisperModel.value.copy(
-                    downloading = false, installed = true, progress = 1f
-                )
+                _whisperModel.value = _whisperModel.value.copy(downloading = false, installed = true, progress = 1f)
             } else {
-                _whisperModel.value = _whisperModel.value.copy(
-                    downloading = false, error = "다운로드 실패"
-                )
+                _whisperModel.value = _whisperModel.value.copy(downloading = false, error = "다운로드 실패")
             }
         }
     }
 
-    // ================= 로컬 파일 STT =================
+    // ============ STT (로컬/URL) ============
+    private fun resetSegmentBuffer() {
+        synchronized(segmentBuffer) {
+            segmentBuffer.clear()
+            lastEmitAt = 0L
+        }
+    }
+
+    private fun addSegment(seg: SubtitlePipeline.Segment) {
+        synchronized(segmentBuffer) {
+            segmentBuffer.add(seg)
+            val now = System.currentTimeMillis()
+            if (now - lastEmitAt > emitThrottleMs) {
+                lastEmitAt = now
+                _sttState.value = _sttState.value.copy(segments = segmentBuffer.toList())
+            }
+        }
+    }
+
+    private fun flushSegments() {
+        synchronized(segmentBuffer) {
+            _sttState.value = _sttState.value.copy(segments = segmentBuffer.toList())
+        }
+    }
 
     fun runLocalStt(uri: Uri) {
         if (_sttState.value.running) return
         val model = _whisperModel.value.model
-        if (!_whisperModel.value.installed) {
-            LogBus.log("STT", "모델 미설치")
-            return
-        }
+        if (!_whisperModel.value.installed) { LogBus.log("STT", "모델 미설치"); return }
 
+        resetSegmentBuffer()
         _sttState.value = SttState(running = true, stage = "start", percent = 0)
 
-        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+        viewModelScope.launch(Dispatchers.IO) {
             val srt = SubtitlePipeline.run(
                 context = getApplication(),
                 sourceUri = uri,
                 model = model,
-                sourceLang = "en",     // 일단 영어 고정. UI에서 바꾸게 확장 가능
+                sourceLang = "auto",
                 targetLang = "ko",
                 onProgress = { p ->
-                    _sttState.value = _sttState.value.copy(
-                        stage = p.stage,
-                        percent = p.percent,
-                        message = p.message
-                    )
+                    _sttState.value = _sttState.value.copy(stage = p.stage, percent = p.percent, message = p.message)
                     LogBus.log("STT", "${p.stage} ${p.percent}% ${p.message}")
                 },
-                onSegment = { seg ->
-                    _sttState.value = _sttState.value.copy(
-                        segments = _sttState.value.segments + seg
-                    )
-                    LogBus.log("SEG", "[${seg.startMs}ms] ${seg.original.take(40)} → ${seg.translated.take(40)}")
-                }
+                onSegment = { seg -> addSegment(seg) }
             )
-
+            flushSegments()
             _sttState.value = _sttState.value.copy(
                 running = false,
                 srtPath = srt?.absolutePath,
@@ -193,14 +199,12 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     fun runUrlStt(url: String) {
         if (_sttState.value.running) return
         val model = _whisperModel.value.model
-        if (!_whisperModel.value.installed) {
-            LogBus.log("STT", "모델 미설치")
-            return
-        }
+        if (!_whisperModel.value.installed) { LogBus.log("STT", "모델 미설치"); return }
 
+        resetSegmentBuffer()
         _sttState.value = SttState(running = true, stage = "start", percent = 0)
 
-        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+        viewModelScope.launch(Dispatchers.IO) {
             val srt = SubtitlePipeline.runFromUrl(
                 context = getApplication(),
                 url = url,
@@ -208,22 +212,16 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
                 sourceLang = "auto",
                 targetLang = "ko",
                 onProgress = { p ->
-                    _sttState.value = _sttState.value.copy(
-                        stage = p.stage, percent = p.percent, message = p.message
-                    )
+                    _sttState.value = _sttState.value.copy(stage = p.stage, percent = p.percent, message = p.message)
                     LogBus.log("URL", "${p.stage} ${p.percent}% ${p.message}")
                 },
-                onSegment = { seg ->
-                    _sttState.value = _sttState.value.copy(
-                        segments = _sttState.value.segments + seg
-                    )
-                },
+                onSegment = { seg -> addSegment(seg) },
                 onStreamInfo = { info ->
                     LogBus.log("URL", "제목: ${info.title}, ${info.durationSec}초")
                     _lastStreamInfo.value = info
                 }
             )
-
+            flushSegments()
             _sttState.value = _sttState.value.copy(
                 running = false,
                 srtPath = srt?.absolutePath,
@@ -235,17 +233,16 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     fun playLastStream() {
         val info = _lastStreamInfo.value ?: return
         val playUrl = info.videoUrl ?: return
-        LogBus.log("VM", "재생 시작: ${playUrl.take(60)}")
         _videoUrl.value = playUrl
         _mode.value = PlayerMode.LOCAL
     }
 
     fun clearStt() {
+        resetSegmentBuffer()
         _sttState.value = SttState()
     }
 
-    // ================= 기존 캡처/웹 =================
-
+    // ============ 캡처/웹 ============
     private fun refreshModelStatus() {
         val lang = _modelStatus.value.language
         val installed = ModelDownloader.isInstalled(getApplication(), lang)
@@ -274,9 +271,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
                 _modelStatus.value = _modelStatus.value.copy(progress = p)
             }
             if (ok) {
-                _modelStatus.value = _modelStatus.value.copy(
-                    downloading = false, installed = true, progress = 1f
-                )
+                _modelStatus.value = _modelStatus.value.copy(downloading = false, installed = true, progress = 1f)
                 createPipeline(lang)
             } else {
                 _modelStatus.value = _modelStatus.value.copy(downloading = false, error = "다운로드 실패")

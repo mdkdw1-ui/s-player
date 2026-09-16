@@ -309,8 +309,11 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel()) {
                                 Text("▶ 재생", fontSize = 12.sp)
                             }
                         }
+                        TextButton(onClick = { sttPanelOpen = false }) {
+                            Text("▼ 미니로", fontSize = 12.sp)
+                        }
                         TextButton(onClick = { vm.clearStt(); sttPanelOpen = false }) {
-                            Text("닫기", fontSize = 12.sp)
+                            Text("✕", fontSize = 12.sp)
                         }
                     }
                     LazyColumn(modifier = Modifier.fillMaxSize().padding(horizontal = 8.dp)) {
@@ -389,8 +392,8 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel()) {
             )
         }
 
-        // STT 진행 중인데 패널 닫혀 있으면 하단 미니바
-        if (sttState.running && !sttPanelOpen) {
+        // STT 진행 중이거나 결과가 있을 때, 패널 닫혀 있으면 하단 미니바
+        if ((sttState.running || sttState.segments.isNotEmpty()) && !sttPanelOpen) {
             Card(
                 colors = CardDefaults.cardColors(
                     containerColor = MaterialTheme.colorScheme.primaryContainer

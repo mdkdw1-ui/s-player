@@ -13,19 +13,10 @@ object SubtitleCache {
     fun cacheDir(context: Context): File =
         File(AudioPaths.subtitleDir(context), "cache").apply { mkdirs() }
 
-    /**
-     * URL 정규화: 같은 영상이면 같은 키가 나오도록.
-     * - YouTube: youtu.be/ID, youtube.com/watch?v=ID, m.youtube.com/watch?v=ID, youtube.com/shorts/ID
-     * - 기타: URL 그대로
-     */
     fun normalize(url: String): String {
         val trimmed = url.trim().trimEnd('/')
-
-        // YouTube videoId 추출
         val ytId = extractYouTubeId(trimmed)
         if (ytId != null) return "yt:$ytId"
-
-        // SoundCloud, Vimeo 등은 URL 그대로
         return trimmed
     }
 
@@ -33,18 +24,14 @@ object SubtitleCache {
         return try {
             val uri = android.net.Uri.parse(url)
             val host = uri.host?.lowercase() ?: return null
-
             when {
                 host.contains("youtu.be") -> {
-                    // https://youtu.be/VIDEO_ID
                     uri.pathSegments.firstOrNull()?.takeIf { it.length == 11 }
                 }
                 host.contains("youtube.com") -> {
-                    // /watch?v=VIDEO_ID
                     val v = uri.getQueryParameter("v")
                     if (v != null && v.length == 11) v
                     else {
-                        // /shorts/VIDEO_ID, /embed/VIDEO_ID, /v/VIDEO_ID
                         val segs = uri.pathSegments
                         when {
                             segs.size >= 2 && (segs[0] == "shorts" || segs[0] == "embed" || segs[0] == "v") -> segs[1]
@@ -54,9 +41,7 @@ object SubtitleCache {
                 }
                 else -> null
             }
-        } catch (e: Exception) {
-            null
-        }
+        } catch (e: Exception) { null }
     }
 
     fun hashKey(input: String): String {
@@ -70,9 +55,9 @@ object SubtitleCache {
 
     fun exists(context: Context, sourceKey: String, targetLang: String): Boolean {
         val f = srtFile(context, sourceKey, targetLang)
-        val exists = f.exists() && f.length() > 50
-        if (exists) Log.i(TAG, "캐시 히트: ${f.name} (${f.length()} bytes)")
-        return exists
+        val e = f.exists() && f.length() > 50
+        if (e) Log.i(TAG, "캐시 히트: ${f.name} (${f.length()} bytes)")
+        return e
     }
 
     fun read(context: Context, sourceKey: String, targetLang: String): String? {
@@ -85,24 +70,43 @@ object SubtitleCache {
         val f = srtFile(context, sourceKey, targetLang)
         f.parentFile?.mkdirs()
         f.writeText(content)
-        Log.i(TAG, "캐시 저장: ${f.name} (${content.length} bytes) key=${normalize(sourceKey)}")
+        Log.i(TAG, "캐시 저장: ${f.name} (${content.length} bytes)")
         return f
     }
 
+    /**
+     * SRT 파싱. 예외가 나도 절대 크래시하지 않도록 방어.
+     */
     fun parseSrt(srt: String): List<SubtitlePipeline.Segment> {
         val out = mutableListOf<SubtitlePipeline.Segment>()
-        val blocks = srt.split(Regex("\n\n+"))
-        for (block in blocks) {
-            val lines = block.trim().split('\n')
-            if (lines.size < 3) continue
-            val timeLine = lines[1]
-            val m = Regex("(\\d{2}):(\\d{2}):(\\d{2}),(\\d{3}) --> (\\d{2}):(\\d{2}):(\\d{2}),(\\d{3})").find(timeLine) ?: continue
-            val (_, sh, sm, ss, sms, _, eh, em, es, ems) = m.destructured
-            val startMs = sh.toLong()*3600000 + sm.toLong()*60000 + ss.toLong()*1000 + sms.toLong()
-            val endMs   = eh.toLong()*3600000 + em.toLong()*60000 + es.toLong()*1000 + ems.toLong()
-            val text = lines.drop(2).joinToString(" ").trim()
-            if (text.isEmpty()) continue
-            out.add(SubtitlePipeline.Segment(startMs, endMs, "", text))
+        try {
+            val blocks = srt.split(Regex("\n\\s*\n"))
+            for (block in blocks) {
+                try {
+                    val lines = block.trim().split('\n')
+                    if (lines.size < 3) continue
+
+                    // 시간 라인 찾기 (index 1 이 아닐 수도 있음)
+                    val timeLine = lines.firstOrNull { it.contains("-->") } ?: continue
+                    val m = Regex("(\\d{2}):(\\d{2}):(\\d{2}),(\\d{3})\\s*-->\\s*(\\d{2}):(\\d{2}):(\\d{2}),(\\d{3})")
+                        .find(timeLine) ?: continue
+
+                    val g = m.groupValues
+                    val startMs = g[1].toLong()*3600000 + g[2].toLong()*60000 + g[3].toLong()*1000 + g[4].toLong()
+                    val endMs   = g[5].toLong()*3600000 + g[6].toLong()*60000 + g[7].toLong()*1000 + g[8].toLong()
+
+                    // 시간 라인 이후 텍스트만
+                    val timeIdx = lines.indexOf(timeLine)
+                    val text = lines.drop(timeIdx + 1).joinToString(" ").trim()
+                    if (text.isEmpty()) continue
+
+                    out.add(SubtitlePipeline.Segment(startMs, endMs, "", text))
+                } catch (e: Exception) {
+                    Log.w(TAG, "블록 파싱 실패 (skip): ${e.message}")
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "SRT 파싱 실패", e)
         }
         return out
     }
