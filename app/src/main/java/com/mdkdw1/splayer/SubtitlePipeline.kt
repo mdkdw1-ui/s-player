@@ -9,15 +9,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
 
-/**
- * 로컬 미디어 파일 → 자막(SRT) 파이프라인.
- *
- * 1. 파일 복사 (URI → cache)
- * 2. AudioDecoder 로 WAV 변환 (16kHz mono)
- * 3. WhisperBridge 로 세그먼트 추출
- * 4. 각 세그먼트 번역
- * 5. SRT 파일로 저장
- */
 object SubtitlePipeline {
 
     private const val TAG = "SubtitlePipeline"
@@ -35,15 +26,6 @@ object SubtitlePipeline {
         val message: String = ""
     )
 
-    /**
-     * @param context 앱 컨텍스트
-     * @param sourceUri 로컬 파일 URI (content:// 또는 file://)
-     * @param model Whisper 모델
-     * @param sourceLang 원본 언어 (Whisper에 전달, "auto" 가능)
-     * @param targetLang 번역 타깃 ("ko")
-     * @param onProgress 진행률 콜백
-     * @param onSegment 세그먼트마다 콜백
-     */
     suspend fun run(
         context: Context,
         sourceUri: Uri,
@@ -53,105 +35,138 @@ object SubtitlePipeline {
         onProgress: (Progress) -> Unit,
         onSegment: (Segment) -> Unit
     ): File? = withContext(Dispatchers.IO) {
+        LogBus.log(TAG, "=== START uri=$sourceUri")
 
         // ---------- 1. 원본 파일 복사 ----------
         onProgress(Progress("copy", 0, "파일 복사 중..."))
+        LogBus.log(TAG, "[1] 복사 시작")
 
         val inputFile = copyToCache(context, sourceUri)
         if (inputFile == null) {
+            LogBus.log(TAG, "[1] 복사 실패")
             onProgress(Progress("error", 0, "파일 복사 실패"))
             return@withContext null
         }
-        Log.i(TAG, "입력 파일: ${inputFile.absolutePath}, ${inputFile.length()} bytes")
-        onProgress(Progress("copy", 100, "복사 완료 (${inputFile.length() / 1024 / 1024}MB)"))
+        LogBus.log(TAG, "[1] 복사 완료: ${inputFile.absolutePath} (${inputFile.length()} bytes)")
+        onProgress(Progress("copy", 100, "복사 완료"))
 
         // ---------- 2. WAV 디코딩 ----------
         onProgress(Progress("decode", 0, "오디오 디코딩 중..."))
+        LogBus.log(TAG, "[2] 디코딩 시작")
 
         val wavFile = AudioPaths.tempWav(context, "test")
         if (wavFile.exists()) wavFile.delete()
 
-        val decodeOk = AudioDecoder.decodeToWav(inputFile, wavFile)
+        val decodeOk = try {
+            AudioDecoder.decodeToWav(inputFile, wavFile)
+        } catch (e: Exception) {
+            LogBus.log(TAG, "[2] 디코딩 예외: ${e.message}")
+            false
+        }
+
         if (!decodeOk || !wavFile.exists()) {
+            LogBus.log(TAG, "[2] 디코딩 실패 (ok=$decodeOk, exists=${wavFile.exists()})")
             onProgress(Progress("error", 0, "디코딩 실패"))
             return@withContext null
         }
-        Log.i(TAG, "WAV: ${wavFile.absolutePath}, ${wavFile.length()} bytes")
-        onProgress(Progress("decode", 100, "디코딩 완료 (${wavFile.length() / 1024 / 1024}MB)"))
+        LogBus.log(TAG, "[2] 디코딩 완료: ${wavFile.absolutePath} (${wavFile.length()} bytes)")
+        onProgress(Progress("decode", 100, "디코딩 완료"))
 
         // ---------- 3. Whisper STT ----------
-        onProgress(Progress("stt", 0, "음성 인식 준비..."))
+        onProgress(Progress("stt", 0, "Whisper 모델 로드 중..."))
+        LogBus.log(TAG, "[3] 모델 확인")
 
         if (!WhisperModelDownloader.isInstalled(context, model)) {
-            onProgress(Progress("error", 0, "모델 미설치: ${model.displayName}"))
+            LogBus.log(TAG, "[3] 모델 미설치: ${model.id}")
+            onProgress(Progress("error", 0, "모델 미설치"))
             return@withContext null
         }
         val modelPath = WhisperModelDownloader.modelFile(context, model).absolutePath
-        Log.i(TAG, "모델: $modelPath")
+        LogBus.log(TAG, "[3] 모델 경로: $modelPath")
 
-        // 세그먼트 수집
         val collected = mutableListOf<Segment>()
         val translator = GoogleTranslator()
 
-        val sttOk = WhisperBridge.transcribe(
-            modelPath = modelPath,
-            wavPath = wavFile.absolutePath,
-            language = sourceLang,
-            threads = Runtime.getRuntime().availableProcessors().coerceAtMost(4),
-            callback = object : WhisperBridge.SegmentCallback {
+        // 번역은 별도 스레드에서 순차 처리
+        val translateQueue = java.util.concurrent.LinkedBlockingQueue<Segment>()
+        val segmentsLock = Object()
+        var translatorThread: Thread? = null
 
-                override fun onSegment(startMs: Long, endMs: Long, text: String) {
-                    val trimmed = text.trim()
-                    if (trimmed.isEmpty()) return
+        translatorThread = Thread {
+            while (true) {
+                val seg = try { translateQueue.take() } catch (e: Exception) { break }
+                if (seg.original == "__DONE__") break
 
-                    // 번역은 여기서 동기로 (Whisper 스레드 안). suspend 불가라 blocking.
-                    // 개선: 큐에 넣고 별도 스레드에서 처리. 일단 그냥 진행.
-                    val translated = try {
-                        kotlinx.coroutines.runBlocking {
-                            if (targetLang == sourceLang) trimmed
-                            else translator.translate(trimmed, targetLang, sourceLang)
-                        }
-                    } catch (e: Exception) {
-                        Log.e(TAG, "번역 실패", e)
-                        ""
+                val translated = try {
+                    if (targetLang == sourceLang) seg.original
+                    else kotlinx.coroutines.runBlocking {
+                        translator.translate(seg.original, targetLang, sourceLang)
+                    }
+                } catch (e: Exception) {
+                    LogBus.log(TAG, "번역 예외: ${e.message}")
+                    ""
+                }
+                val finalSeg = seg.copy(translated = translated)
+                synchronized(segmentsLock) { collected.add(finalSeg) }
+                onSegment(finalSeg)
+                LogBus.log(TAG, "SEG [${finalSeg.startMs}ms] ${finalSeg.original.take(40)}")
+            }
+        }
+        translatorThread.start()
+
+        LogBus.log(TAG, "[3] Whisper 시작 (lang=$sourceLang)")
+        onProgress(Progress("stt", 0, "음성 인식 중..."))
+
+        val sttOk = try {
+            WhisperBridge.transcribe(
+                modelPath = modelPath,
+                wavPath = wavFile.absolutePath,
+                language = sourceLang,
+                threads = 4,
+                callback = object : WhisperBridge.SegmentCallback {
+                    override fun onSegment(startMs: Long, endMs: Long, text: String) {
+                        val trimmed = text.trim()
+                        if (trimmed.isEmpty()) return
+                        // 번역 큐에 넣고 즉시 리턴 (Whisper 스레드 블록 방지)
+                        translateQueue.put(Segment(startMs, endMs, trimmed, ""))
                     }
 
-                    val seg = Segment(startMs, endMs, trimmed, translated)
-                    collected.add(seg)
-                    onSegment(seg)
-                }
+                    override fun onProgress(percent: Int) {
+                        onProgress(Progress("stt", percent, "인식 중 $percent%"))
+                    }
 
-                override fun onProgress(percent: Int) {
-                    onProgress(Progress("stt", percent, "인식 중... $percent%"))
+                    override fun onComplete() {
+                        LogBus.log(TAG, "[3] Whisper 완료")
+                    }
                 }
+            )
+        } catch (e: Exception) {
+            LogBus.log(TAG, "[3] Whisper 예외: ${e.message}")
+            false
+        }
 
-                override fun onComplete() {
-                    onProgress(Progress("stt", 100, "인식 완료 (${collected.size}개 세그먼트)"))
-                }
-            }
-        )
+        // 번역 스레드 종료
+        translateQueue.put(Segment(0, 0, "__DONE__", ""))
+        try { translatorThread.join(3000) } catch (_: Exception) {}
 
         if (!sttOk) {
+            LogBus.log(TAG, "[3] STT 실패")
             onProgress(Progress("error", 0, "STT 실패"))
             return@withContext null
         }
 
+        val finalSegments = synchronized(segmentsLock) { collected.toList() }
+        LogBus.log(TAG, "[3] 완료: ${finalSegments.size} 세그먼트")
+
         // ---------- 4. SRT 저장 ----------
         onProgress(Progress("srt", 0, "자막 파일 저장..."))
-
         val srtFile = File(AudioPaths.subtitleDir(context), "test_${targetLang}.srt")
-        writeSrt(srtFile, collected)
+        writeSrt(srtFile, finalSegments)
+        LogBus.log(TAG, "[4] SRT: ${srtFile.absolutePath}")
 
-        Log.i(TAG, "SRT: ${srtFile.absolutePath}")
-        onProgress(Progress("done", 100, "완료: ${srtFile.absolutePath}"))
-
-        // 임시 WAV 정리 (선택)
-        // wavFile.delete()
-
+        onProgress(Progress("done", 100, "완료: ${finalSegments.size} 세그먼트"))
         srtFile
     }
-
-    // ---------- 유틸 ----------
 
     private fun copyToCache(context: Context, uri: Uri): File? = try {
         val name = queryFileName(context, uri) ?: "input_${System.currentTimeMillis()}"
@@ -175,9 +190,7 @@ object SubtitlePipeline {
             val idx = c.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
             if (idx >= 0 && c.moveToFirst()) c.getString(idx) else null
         }
-    } catch (e: Exception) {
-        null
-    }
+    } catch (e: Exception) { null }
 
     private fun writeSrt(file: File, segments: List<Segment>) {
         file.parentFile?.mkdirs()
@@ -185,7 +198,6 @@ object SubtitlePipeline {
         segments.forEachIndexed { i, seg ->
             sb.append(i + 1).append('\n')
             sb.append(formatTime(seg.startMs)).append(" --> ").append(formatTime(seg.endMs)).append('\n')
-            // 번역이 있으면 번역, 없으면 원문
             sb.append(if (seg.translated.isNotBlank()) seg.translated else seg.original).append('\n')
             sb.append('\n')
         }
