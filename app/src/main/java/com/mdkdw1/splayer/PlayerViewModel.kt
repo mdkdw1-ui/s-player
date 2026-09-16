@@ -1,6 +1,8 @@
 package com.mdkdw1.splayer
 
 import android.app.Application
+import android.content.Intent
+import android.os.Build
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -39,12 +41,15 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     private val _modelStatus = MutableStateFlow(ModelStatus())
     val modelStatus: StateFlow<ModelStatus> = _modelStatus
 
+    private val _captureOn = MutableStateFlow(false)
+    val captureOn: StateFlow<Boolean> = _captureOn
+
     private val _videoUrl = MutableStateFlow(
         "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4"
     )
     val videoUrl: StateFlow<String> = _videoUrl
 
-    private val _currentUrl = MutableStateFlow("https://www.w3schools.com/html/html5_video.asp")
+    private val _currentUrl = MutableStateFlow("https://edition.cnn.com/")
     val currentUrl: StateFlow<String> = _currentUrl
 
     private val _urlInput = MutableStateFlow(_currentUrl.value)
@@ -58,6 +63,10 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     init {
         refreshModelStatus()
         LogBus.log("VM", "init")
+
+        AudioCaptureService.onSamples = { samples, rate ->
+            pipeline?.push(samples, sampleRate = rate)
+        }
     }
 
     private fun refreshModelStatus() {
@@ -109,6 +118,33 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    fun startCapture(resultCode: Int, data: Intent) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            LogBus.log("CAP", "Android 10 미만은 지원 안 함")
+            return
+        }
+        val ctx = getApplication<Application>()
+        val intent = Intent(ctx, AudioCaptureService::class.java).apply {
+            putExtra(AudioCaptureService.EXTRA_RESULT_CODE, resultCode)
+            putExtra(AudioCaptureService.EXTRA_RESULT_DATA, data)
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            ctx.startForegroundService(intent)
+        } else {
+            ctx.startService(intent)
+        }
+        _captureOn.value = true
+        LogBus.log("CAP", "start service")
+    }
+
+    fun stopCapture() {
+        val ctx = getApplication<Application>()
+        ctx.stopService(Intent(ctx, AudioCaptureService::class.java))
+        _captureOn.value = false
+        AudioCaptureService.onSamples = null
+        LogBus.log("CAP", "stop service")
+    }
+
     fun setMode(m: PlayerMode) { _mode.value = m }
     fun setSpeed(s: Float) { _speed.value = s.coerceIn(0.25f, 4.0f) }
     fun updateSubtitle(cue: SubtitleCue) { _subtitle.value = cue }
@@ -139,7 +175,6 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     fun onWebViewUrlChanged(url: String) {
         _currentUrl.value = url
         _urlInput.value = url
-        pipeline?.reset()
     }
 
     fun onAudioChunk(samples: FloatArray) {
@@ -150,5 +185,6 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         super.onCleared()
         pipeline?.close()
         pipeline = null
+        AudioCaptureService.onSamples = null
     }
 }

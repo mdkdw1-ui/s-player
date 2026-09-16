@@ -10,12 +10,15 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.BugReport
+import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.MicOff
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
@@ -26,6 +29,8 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun PlayerScreen(vm: PlayerViewModel = viewModel()) {
+    val ctx = LocalContext.current
+
     val mode by vm.mode.collectAsState()
     val speed by vm.speed.collectAsState()
     val subtitle by vm.subtitle.collectAsState()
@@ -34,17 +39,24 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel()) {
     val urlInput by vm.urlInput.collectAsState()
     val videoFound by vm.videoFound.collectAsState()
     val modelStatus by vm.modelStatus.collectAsState()
+    val captureOn by vm.captureOn.collectAsState()
     val logs by LogBus.lines.collectAsState()
 
     var webViewRef by remember { mutableStateOf<WebView?>(null) }
     var langMenuOpen by remember { mutableStateOf(false) }
     var logPanelOpen by remember { mutableStateOf(false) }
 
+    val captureLauncher = rememberCapturePermissionLauncher(
+        onGranted = { code, data -> vm.startCapture(code, data) },
+        onDenied = { LogBus.log("CAP", "권한 거부됨") }
+    )
+
     Column(modifier = Modifier.fillMaxSize()) {
         TopAppBar(
             title = {
                 Text(
                     when {
+                        captureOn -> "S-Player ●REC"
                         mode == PlayerMode.WEBVIEW && videoFound -> "S-Player ●"
                         mode == PlayerMode.WEBVIEW -> "S-Player (웹)"
                         else -> "S-Player (로컬)"
@@ -59,6 +71,19 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel()) {
                 }
             },
             actions = {
+                // 시스템 오디오 캡처 토글
+                IconButton(onClick = {
+                    if (captureOn) vm.stopCapture()
+                    else captureLauncher.launch(buildCaptureIntent(ctx))
+                }) {
+                    Icon(
+                        if (captureOn) Icons.Default.Mic else Icons.Default.MicOff,
+                        contentDescription = "시스템 오디오 캡처",
+                        tint = if (captureOn) MaterialTheme.colorScheme.primary
+                               else MaterialTheme.colorScheme.onSurface
+                    )
+                }
+
                 Box {
                     TextButton(onClick = { langMenuOpen = true }) {
                         Text(modelStatus.language.displayName)
@@ -70,30 +95,21 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel()) {
                         SttLanguage.values().forEach { lang ->
                             DropdownMenuItem(
                                 text = { Text("${lang.displayName} (${lang.approxMb}MB)") },
-                                onClick = {
-                                    vm.selectLanguage(lang)
-                                    langMenuOpen = false
-                                }
+                                onClick = { vm.selectLanguage(lang); langMenuOpen = false }
                             )
                         }
                     }
                 }
+
                 if (mode == PlayerMode.WEBVIEW) {
                     IconButton(onClick = { webViewRef?.reload() }) {
                         Icon(Icons.Default.Refresh, contentDescription = "새로고침")
                     }
                 }
+
                 IconButton(onClick = { logPanelOpen = !logPanelOpen }) {
                     Icon(Icons.Default.BugReport, contentDescription = "로그")
                 }
-                TextButton(
-                    onClick = { vm.setMode(PlayerMode.LOCAL) },
-                    enabled = mode != PlayerMode.LOCAL
-                ) { Text("L") }
-                TextButton(
-                    onClick = { vm.setMode(PlayerMode.WEBVIEW) },
-                    enabled = mode != PlayerMode.WEBVIEW
-                ) { Text("W") }
             }
         )
 
