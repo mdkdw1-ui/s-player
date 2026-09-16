@@ -20,13 +20,14 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Install NDK
+      - name: Install NDK and CMake
         run: |
-          sdkmanager --install "ndk;26.1.10909125" "cmake;3.22.1"
-          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/26.1.10909125" >> $GITHUB_ENV
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
+          ls $ANDROID_HOME/ndk 2>/dev/null || echo "no ndk dir"
+          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --install "ndk;26.1.10909125" "cmake;3.22.1" || \
+          yes | $ANDROID_HOME/cmdline-tools/16.0/bin/sdkmanager --install "ndk;26.1.10909125" "cmake;3.22.1" || \
+          echo "sdkmanager 경로 확인 필요"
 
       - name: Cache Gradle
         uses: actions/cache@v4
