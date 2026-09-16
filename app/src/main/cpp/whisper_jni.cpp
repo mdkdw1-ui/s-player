@@ -8,13 +8,14 @@
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
 extern "C" JNIEXPORT jstring JNICALL
-Java_com_mdkdw1_splayer_WhisperBridge_nativeVersion(JNIEnv *env, jobject /* this */) {
-    return env->NewStringUTF(whisper_version());
+Java_com_mdkdw1_splayer_WhisperBridge_nativeSystemInfo(JNIEnv *env, jobject) {
+    const char *info = whisper_print_system_info();
+    return env->NewStringUTF(info ? info : "unknown");
 }
 
-extern "C" JNIEXPORT jboolean JNICALL
+extern "C" JNIEXPORT jlong JNICALL
 Java_com_mdkdw1_splayer_WhisperBridge_nativeInit(
-        JNIEnv *env, jobject /* this */, jstring modelPath) {
+        JNIEnv *env, jobject, jstring modelPath) {
     const char *path = env->GetStringUTFChars(modelPath, nullptr);
     LOGI("nativeInit: %s", path);
 
@@ -26,8 +27,9 @@ Java_com_mdkdw1_splayer_WhisperBridge_nativeInit(
 
     if (ctx == nullptr) {
         LOGE("whisper_init 실패");
-        return JNI_FALSE;
+        return 0;
     }
     LOGI("whisper_init 성공");
-    return JNI_TRUE;
+    LOGI("system info: %s", whisper_print_system_info());
+    return reinterpret_cast<jlong>(ctx);
 }
