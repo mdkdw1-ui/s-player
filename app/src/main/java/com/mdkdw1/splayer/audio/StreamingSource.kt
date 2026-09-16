@@ -7,19 +7,19 @@ import java.io.InputStream
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.locks.ReentrantLock
 
-/**
- * 네트워크 스트림을 백그라운드로 받아 메모리에 청크로 쌓는 버퍼.
- * MediaDataSource 가 이걸 읽어서 MediaExtractor 에 전달.
- */
 class StreamingSource(
     private val url: String,
     private val maxBufferBytes: Long = 200L * 1024 * 1024
 ) {
-    companion object { private const val TAG = "StreamingSource" }
+    companion object {
+        private const val TAG = "StreamingSource"
+        private const val MAX_RETRY = 8
+    }
 
     private val client = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
         .readTimeout(60, TimeUnit.SECONDS)
+        .retryOnConnectionFailure(true)
         .build()
 
     private val buffer = ArrayDeque<Chunk>()
@@ -41,6 +41,9 @@ class StreamingSource(
     private var downloadThread: Thread? = null
     private var discardedBytes: Long = 0L
 
+    // 이어받기용: 지금까지 버퍼에 남아있는 최대 위치
+    private var lastBufferedEnd: Long = 0L
+
     data class Chunk(val start: Long, val data: ByteArray) {
         val end: Long get() = start + data.size
     }
@@ -48,68 +51,122 @@ class StreamingSource(
     fun start() {
         if (downloadThread != null) return
         downloadThread = Thread {
-            try {
-                val req = Request.Builder()
-                    .url(url)
-                    .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
-                    .header("Accept", "*/*")
-                    .build()
-                client.newCall(req).execute().use { resp ->
-                    if (!resp.isSuccessful) {
-                        downloadError = "HTTP ${resp.code}"
-                        return@use
+            var attempt = 0
+            while (attempt < MAX_RETRY && !downloadComplete) {
+                try {
+                    downloadOnce(attempt)
+                    // downloadOnce 가 정상 종료되면 완료
+                    break
+                } catch (e: Exception) {
+                    downloadError = e.message ?: "unknown"
+                    Log.e(TAG, "다운로드 예외 #${attempt + 1}: ${e.message}")
+                    LogBus.log(TAG, "재시도 #${attempt + 1}: ${e.message}")
+                    attempt++
+                    if (attempt < MAX_RETRY) {
+                        try { Thread.sleep(1000L * attempt) } catch (_: Exception) {}
                     }
-                    val body = resp.body ?: run {
-                        downloadError = "empty body"
-                        return@use
-                    }
-                    totalSize = body.contentLength()
-                    Log.i(TAG, "시작 total=$totalSize")
-
-                    val input: InputStream = body.byteStream()
-                    val buf = ByteArray(64 * 1024)
-                    var offset = 0L
-
-                    while (true) {
-                        val n = input.read(buf)
-                        if (n <= 0) break
-                        val copy = buf.copyOf(n)
-                        bufferLock.lock()
-                        try {
-                            buffer.addLast(Chunk(offset, copy))
-                            downloadedBytes = offset + n
-                            // 버퍼 초과 시 오래된 것 삭제
-                            var total = 0L
-                            for (c in buffer) total += c.data.size
-                            while (buffer.isNotEmpty() && total > maxBufferBytes) {
-                                val removed = buffer.removeFirst()
-                                total -= removed.data.size
-                                discardedBytes += removed.data.size
-                            }
-                            bufferCondition.signalAll()
-                        } finally {
-                            bufferLock.unlock()
-                        }
-                        offset += n
-                    }
-                    Log.i(TAG, "다운로드 완료: $downloadedBytes bytes")
                 }
-            } catch (e: Exception) {
-                downloadError = e.message ?: "unknown"
-                Log.e(TAG, "다운로드 에러", e)
-            } finally {
-                downloadComplete = true
-                bufferLock.lock()
-                try { bufferCondition.signalAll() } finally { bufferLock.unlock() }
             }
+            if (attempt >= MAX_RETRY) {
+                downloadError = "최대 재시도 초과"
+            }
+            downloadComplete = true
+            bufferLock.lock()
+            try { bufferCondition.signalAll() } finally { bufferLock.unlock() }
         }.apply { isDaemon = true; start() }
+    }
+
+    private fun downloadOnce(attempt: Int) {
+        // 이어받기 시작 위치
+        val startPos = lastBufferedEnd
+
+        val reqBuilder = Request.Builder()
+            .url(url)
+            .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+            .header("Accept", "*/*")
+            .header("Accept-Encoding", "identity")
+            .header("Connection", "keep-alive")
+
+        if (startPos > 0) {
+            reqBuilder.header("Range", "bytes=$startPos-")
+            Log.i(TAG, "이어받기 #${attempt + 1} @ $startPos")
+        } else {
+            Log.i(TAG, "새 다운로드 #${attempt + 1}")
+        }
+
+        client.newCall(reqBuilder.build()).execute().use { resp ->
+            val isPartial = resp.code == 206
+            if (!resp.isSuccessful && !isPartial) {
+                throw Exception("HTTP ${resp.code}")
+            }
+            val body = resp.body ?: throw Exception("empty body")
+
+            // 전체 크기 (206 이면 Content-Range 에서)
+            if (totalSize < 0) {
+                totalSize = if (isPartial) {
+                    val cr = resp.header("Content-Range") ?: ""
+                    cr.substringAfterLast('/').toLongOrNull() ?: -1L
+                } else {
+                    body.contentLength()
+                }
+                Log.i(TAG, "totalSize=$totalSize")
+            }
+
+            val input: InputStream = body.byteStream()
+            val buf = ByteArray(64 * 1024)
+            var offset = if (isPartial) startPos else 0L
+
+            // 새로 시작이면 버퍼 초기화
+            if (!isPartial && startPos == 0L) {
+                bufferLock.lock()
+                try {
+                    buffer.clear()
+                    downloadedBytes = 0
+                } finally { bufferLock.unlock() }
+            }
+
+            while (true) {
+                val n = input.read(buf)
+                if (n <= 0) break
+                val copy = buf.copyOf(n)
+                bufferLock.lock()
+                try {
+                    buffer.addLast(Chunk(offset, copy))
+                    downloadedBytes = offset + n
+                    lastBufferedEnd = downloadedBytes
+
+                    var total = 0L
+                    for (c in buffer) total += c.data.size
+                    while (buffer.isNotEmpty() && total > maxBufferBytes) {
+                        val removed = buffer.removeFirst()
+                        total -= removed.data.size
+                        discardedBytes += removed.data.size
+                    }
+                    bufferCondition.signalAll()
+                } finally {
+                    bufferLock.unlock()
+                }
+                offset += n
+            }
+
+            if (totalSize > 0 && downloadedBytes >= totalSize) {
+                Log.i(TAG, "다운로드 완료: $downloadedBytes / $totalSize")
+                downloadComplete = true
+            } else {
+                // 조기 종료 → 재시도 유도
+                Log.i(TAG, "조기 종료: $downloadedBytes / $totalSize")
+                if (totalSize > 0 && downloadedBytes < totalSize) {
+                    throw Exception("early EOF")
+                }
+            }
+        }
     }
 
     fun readAt(position: Long, target: ByteArray, offset: Int, len: Int): Int {
         bufferLock.lock()
         try {
             var waited = 0L
-            val maxWaitMs = 30_000L  // 최대 30초 대기
+            val maxWaitMs = 30_000L
             while (true) {
                 val chunk = findChunk(position)
                 if (chunk != null) {
@@ -124,9 +181,7 @@ class StreamingSource(
                 }
                 try {
                     bufferCondition.await(1000, TimeUnit.MILLISECONDS)
-                } catch (e: InterruptedException) {
-                    return -1
-                }
+                } catch (e: InterruptedException) { return -1 }
                 waited += 1000
                 if (waited > maxWaitMs) {
                     Log.e(TAG, "readAt 타임아웃 pos=$position")
