@@ -66,7 +66,7 @@ object SubtitlePipeline {
         onProgress: (Progress) -> Unit,
         onSegment: (Segment) -> Unit,
         onStreamInfo: (StreamResult) -> Unit = {}
-    ): File? {
+    ): File? = withContext(Dispatchers.IO) {
         LogBus.log(TAG, "=== URL START: $url")
 
         // 캐시 확인

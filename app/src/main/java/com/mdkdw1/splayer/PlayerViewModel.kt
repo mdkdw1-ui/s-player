@@ -159,7 +159,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
 
         _sttState.value = SttState(running = true, stage = "start", percent = 0)
 
-        viewModelScope.launch {
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
             val srt = SubtitlePipeline.run(
                 context = getApplication(),
                 sourceUri = uri,
@@ -200,7 +200,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
 
         _sttState.value = SttState(running = true, stage = "start", percent = 0)
 
-        viewModelScope.launch {
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
             val srt = SubtitlePipeline.runFromUrl(
                 context = getApplication(),
                 url = url,
