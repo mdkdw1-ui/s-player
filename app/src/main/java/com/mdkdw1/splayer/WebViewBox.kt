@@ -7,9 +7,18 @@ import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
-import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.material3.LinearProgressIndicator
-import androidx.compose.runtime.*
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.viewinterop.AndroidView
 import org.json.JSONArray
@@ -20,7 +29,9 @@ class JsBridge(
     private val onVideoFound: (Boolean) -> Unit
 ) {
     @JavascriptInterface
-    fun onCaption(text: String) = onCaption(text)
+    fun onCaption(text: String) {
+        onCaption(text)
+    }
 
     @JavascriptInterface
     fun onAudio(dataJson: String) {
@@ -31,7 +42,9 @@ class JsBridge(
     }
 
     @JavascriptInterface
-    fun onVideoFound(found: Boolean) = onVideoFound(found)
+    fun onVideoFound(found: Boolean) {
+        onVideoFound(found)
+    }
 }
 
 @SuppressLint("SetJavaScriptEnabled")
@@ -49,7 +62,6 @@ fun WebViewBox(
     var webView by remember { mutableStateOf<WebView?>(null) }
     var currentUrl by remember { mutableStateOf(url) }
 
-    // url 인자가 바뀌면 로드
     LaunchedEffect(url) {
         if (url != currentUrl) {
             currentUrl = url
@@ -57,7 +69,6 @@ fun WebViewBox(
         }
     }
 
-    // 배속 반영
     LaunchedEffect(speed, webView) {
         webView?.applyPlaybackSpeed(speed)
     }
@@ -66,55 +77,54 @@ fun WebViewBox(
         AndroidView(
             modifier = Modifier.fillMaxSize(),
             factory = { ctx ->
-                WebView(ctx).apply {
-                    settings.javaScriptEnabled = true
-                    settings.domStorageEnabled = true
-                    settings.mediaPlaybackRequiresUserGesture = false
-                    settings.loadWithOverviewMode = true
-                    settings.useWideViewPort = true
-                    settings.userAgentString =
-                        settings.userAgentString + " SPlayer/1.0"
+                val wv = WebView(ctx)
+                wv.settings.javaScriptEnabled = true
+                wv.settings.domStorageEnabled = true
+                wv.settings.mediaPlaybackRequiresUserGesture = false
+                wv.settings.loadWithOverviewMode = true
+                wv.settings.useWideViewPort = true
+                wv.settings.userAgentString =
+                    wv.settings.userAgentString + " SPlayer/1.0"
 
-                    webChromeClient = object : WebChromeClient() {
-                        override fun onProgressChanged(view: WebView?, newProgress: Int) {
-                            progress = newProgress
-                        }
+                wv.webChromeClient = object : WebChromeClient() {
+                    override fun onProgressChanged(view: WebView?, newProgress: Int) {
+                        progress = newProgress
                     }
-
-                    webViewClient = object : WebViewClient() {
-                        override fun onPageStarted(
-                            view: WebView?, url: String?, favicon: Bitmap?
-                        ) {
-                            super.onPageStarted(view, url, favicon)
-                            currentUrl = url ?: currentUrl
-                        }
-
-                        override fun onPageFinished(view: WebView?, url: String?) {
-                            super.onPageFinished(view, url)
-                            currentUrl = url ?: currentUrl
-                            view?.injectAudioCaptureScript()
-                        }
-
-                        // 새 창(_blank)도 현재 WebView에서 열기
-                        override fun shouldOverrideUrlLoading(
-                            view: WebView?,
-                            request: WebResourceRequest?
-                        ): Boolean {
-                            val target = request?.url?.toString() ?: return false
-                            view?.loadUrl(target)
-                            return true
-                        }
-                    }
-
-                    addJavascriptInterface(
-                        JsBridge(onCaption, onAudioChunk, onVideoFound),
-                        "AndroidBridge"
-                    )
-
-                    loadUrl(url)
-                    webView = this
-                    onWebViewReady(this)
                 }
+
+                wv.webViewClient = object : WebViewClient() {
+                    override fun onPageStarted(
+                        view: WebView?, url: String?, favicon: Bitmap?
+                    ) {
+                        super.onPageStarted(view, url, favicon)
+                        currentUrl = url ?: currentUrl
+                    }
+
+                    override fun onPageFinished(view: WebView?, url: String?) {
+                        super.onPageFinished(view, url)
+                        currentUrl = url ?: currentUrl
+                        view?.injectAudioCaptureScript()
+                    }
+
+                    override fun shouldOverrideUrlLoading(
+                        view: WebView?,
+                        request: WebResourceRequest?
+                    ): Boolean {
+                        val target = request?.url?.toString() ?: return false
+                        view?.loadUrl(target)
+                        return true
+                    }
+                }
+
+                wv.addJavascriptInterface(
+                    JsBridge(onCaption, onAudioChunk, onVideoFound),
+                    "AndroidBridge"
+                )
+
+                wv.loadUrl(url)
+                webView = wv
+                onWebViewReady(wv)
+                wv
             }
         )
 
@@ -123,7 +133,7 @@ fun WebViewBox(
                 progress = { progress / 100f },
                 modifier = Modifier
                     .fillMaxWidth()
-                    .align(androidx.compose.ui.Alignment.TopCenter)
+                    .align(Alignment.TopCenter)
             )
         }
     }

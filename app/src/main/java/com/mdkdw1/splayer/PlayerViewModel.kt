@@ -22,6 +22,9 @@ class PlayerViewModel : ViewModel() {
     private val _subtitle = MutableStateFlow(SubtitleCue())
     val subtitle: StateFlow<SubtitleCue> = _subtitle
 
+    private val _videoFound = MutableStateFlow(false)
+    val videoFound: StateFlow<Boolean> = _videoFound
+
     private val _videoUrl = MutableStateFlow(
         "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4"
     )
@@ -35,4 +38,19 @@ class PlayerViewModel : ViewModel() {
     fun updateSubtitle(cue: SubtitleCue) { _subtitle.value = cue }
     fun setVideoUrl(url: String) { _videoUrl.value = url }
     fun setWebUrl(url: String) { _webUrl.value = url }
+    fun setVideoFound(found: Boolean) { _videoFound.value = found }
+
+    fun onAudioChunk(samples: FloatArray) {
+        var sum = 0.0
+        for (s in samples) sum += s * s
+        val rms = kotlin.math.sqrt(sum / samples.size)
+        if (rms > 0.01) {
+            updateSubtitle(
+                SubtitleCue(
+                    original = "[audio rms=%.3f]".format(rms),
+                    translated = "오디오 캡처 동작 중"
+                )
+            )
+        }
+    }
 }
