@@ -37,11 +37,14 @@ object SubtitlePipeline {
         targetLang: String = "ko",
         onProgress: (Progress) -> Unit,
         onSegment: (Segment) -> Unit
-    ): File? {
+    ): File? = withContext(Dispatchers.IO) {
         LogBus.log(TAG, "=== 로컬 START")
         onProgress(Progress("copy", 0, "파일 복사 중..."))
         val inputFile = copyToCache(context, sourceUri)
-            ?: run { onProgress(Progress("error", 0, "파일 복사 실패")); return null }
+        if (inputFile == null) {
+            onProgress(Progress("error", 0, "파일 복사 실패"))
+            return@withContext null
+        }
         onProgress(Progress("copy", 100, "복사 완료"))
 
         onProgress(Progress("decode", 0, "오디오 디코딩 중..."))
@@ -50,10 +53,12 @@ object SubtitlePipeline {
         val ok = try { AudioDecoder.decodeToWav(inputFile, wavFile) }
         catch (e: Exception) { LogBus.log(TAG, "디코딩 예외: ${e.message}"); false }
         if (!ok || !wavFile.exists()) {
-            onProgress(Progress("error", 0, "디코딩 실패")); return null
+            onProgress(Progress("error", 0, "디코딩 실패"))
+            return@withContext null
         }
         onProgress(Progress("decode", 100, "디코딩 완료"))
-        return runWhisperAndSrt(context, wavFile, model, sourceLang, targetLang, onProgress, onSegment)
+
+        runWhisperAndSrt(context, wavFile, model, sourceLang, targetLang, onProgress, onSegment, null)
     }
 
     // ================== URL ==================
@@ -76,7 +81,7 @@ object SubtitlePipeline {
             val srt = SubtitleCache.read(context, url, targetLang)
             if (srt != null) {
                 SubtitleCache.parseSrt(srt).forEach { onSegment(it) }
-                return SubtitleCache.srtFile(context, url, targetLang)
+                return@withContext SubtitleCache.srtFile(context, url, targetLang)
             }
         }
 
@@ -84,14 +89,16 @@ object SubtitlePipeline {
         onProgress(Progress("extract", 0, "영상 정보 추출 중..."))
         val info = StreamExtractor.extract(url).getOrNull()
         if (info == null) {
-            onProgress(Progress("error", 0, "스트림 추출 실패")); return null
+            onProgress(Progress("error", 0, "스트림 추출 실패"))
+            return@withContext null
         }
         onStreamInfo(info)
         onProgress(Progress("extract", 100, "${info.title} (${info.durationSec}s)"))
 
         val audioUrl = info.audioUrl ?: info.videoUrl
         if (audioUrl == null) {
-            onProgress(Progress("error", 0, "오디오 스트림 없음")); return null
+            onProgress(Progress("error", 0, "오디오 스트림 없음"))
+            return@withContext null
         }
 
         // 2. 스트리밍 다운로드 + 디코딩 병렬
@@ -128,17 +135,19 @@ object SubtitlePipeline {
 
         if (streaming.downloadError != null) {
             streaming.close()
-            onProgress(Progress("error", 0, "다운로드 실패: ${streaming.downloadError}")); return null
+            onProgress(Progress("error", 0, "다운로드 실패: ${streaming.downloadError}"))
+            return@withContext null
         }
         if (!decodeOk || !wavFile.exists()) {
             streaming.close()
-            onProgress(Progress("error", 0, "디코딩 실패")); return null
+            onProgress(Progress("error", 0, "디코딩 실패"))
+            return@withContext null
         }
         LogBus.log(TAG, "WAV: ${wavFile.length()} bytes")
         onProgress(Progress("decode", 100, "디코딩 완료"))
         streaming.close()
 
-        return runWhisperAndSrt(context, wavFile, model, sourceLang, targetLang, onProgress, onSegment, cacheSourceKey = url)
+        runWhisperAndSrt(context, wavFile, model, sourceLang, targetLang, onProgress, onSegment, url)
     }
 
     // ================== 공통: Whisper + 번역 + SRT ==================
@@ -150,11 +159,11 @@ object SubtitlePipeline {
         targetLang: String,
         onProgress: (Progress) -> Unit,
         onSegment: (Segment) -> Unit,
-        cacheSourceKey: String? = null
-    ): File? = withContext(Dispatchers.IO) {
-
+        cacheSourceKey: String?
+    ): File? {
         if (!WhisperModelDownloader.isInstalled(context, model)) {
-            onProgress(Progress("error", 0, "모델 미설치")); return@withContext null
+            onProgress(Progress("error", 0, "모델 미설치"))
+            return null
         }
         val modelPath = WhisperModelDownloader.modelFile(context, model).absolutePath
 
@@ -207,7 +216,8 @@ object SubtitlePipeline {
         try { translatorThread.join(3000) } catch (_: Exception) {}
 
         if (!sttOk) {
-            onProgress(Progress("error", 0, "STT 실패")); return@withContext null
+            onProgress(Progress("error", 0, "STT 실패"))
+            return null
         }
 
         val finalSegments = synchronized(lock) { collected.toList() }
@@ -222,7 +232,7 @@ object SubtitlePipeline {
         }
 
         onProgress(Progress("done", 100, "완료: ${finalSegments.size} 세그먼트"))
-        srtFile
+        return srtFile
     }
 
     // ================== 유틸 ==================
