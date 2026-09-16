@@ -5,8 +5,6 @@ import android.net.Uri
 import android.util.Log
 import com.mdkdw1.splayer.audio.AudioDecoder
 import com.mdkdw1.splayer.audio.AudioPaths
-import com.mdkdw1.splayer.audio.StreamingDataSource
-import com.mdkdw1.splayer.audio.StreamingSource
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -100,52 +98,33 @@ object SubtitlePipeline {
             onProgress(Progress("error", 0, "오디오 스트림 없음"))
             return@withContext null
         }
+        val ext = guessExt(info.audioMimeType ?: info.videoMimeType)
 
-        // 2. 스트리밍 다운로드 + 디코딩 병렬
-        onProgress(Progress("download", 0, "스트리밍 시작..."))
-        LogBus.log(TAG, "스트리밍 다운로드+디코딩 병렬")
-
-        val streaming = StreamingSource(audioUrl)
-        streaming.start()
-
-        val monitorThread = Thread {
-            while (!streaming.downloadComplete) {
-                val total = streaming.totalSize
-                val done = streaming.downloadedBytes
-                if (total > 0) {
-                    val pct = (done * 100 / total).toInt()
-                    onProgress(Progress("download", pct, "다운로드 $pct%"))
-                }
-                try { Thread.sleep(500) } catch (_: Exception) { break }
-            }
+        // 2. 순차 다운로드
+        onProgress(Progress("download", 0, "다운로드 시작..."))
+        val audioFile = StreamDownloader.download(context, audioUrl, "url_input", ext) { p ->
+            onProgress(Progress("download", (p * 100).toInt(), "다운로드 ${(p*100).toInt()}%"))
         }
-        monitorThread.isDaemon = true
-        monitorThread.start()
-
-        onProgress(Progress("decode", 0, "스트리밍 디코딩..."))
-        val wavFile = AudioPaths.tempWav(context, "test_stream")
-        if (wavFile.exists()) wavFile.delete()
-
-        val dataSource = StreamingDataSource(streaming)
-        val decodeOk = try {
-            AudioDecoder.decodeToWavFromSource(dataSource, wavFile)
-        } catch (e: Exception) {
-            LogBus.log(TAG, "스트리밍 디코딩 예외: ${e.message}"); false
-        }
-
-        if (streaming.downloadError != null) {
-            streaming.close()
-            onProgress(Progress("error", 0, "다운로드 실패: ${streaming.downloadError}"))
+        if (audioFile == null) {
+            onProgress(Progress("error", 0, "다운로드 실패"))
             return@withContext null
         }
+        onProgress(Progress("download", 100, "다운로드 완료 (${audioFile.length() / 1024}KB)"))
+
+        // 3. 디코딩
+        onProgress(Progress("decode", 0, "오디오 디코딩 중..."))
+        val wavFile = AudioPaths.tempWav(context, "test")
+        if (wavFile.exists()) wavFile.delete()
+        val decodeOk = try { AudioDecoder.decodeToWav(audioFile, wavFile) }
+        catch (e: Exception) {
+            LogBus.log(TAG, "디코딩 예외: ${e.message}"); false
+        }
         if (!decodeOk || !wavFile.exists()) {
-            streaming.close()
             onProgress(Progress("error", 0, "디코딩 실패"))
             return@withContext null
         }
         LogBus.log(TAG, "WAV: ${wavFile.length()} bytes")
         onProgress(Progress("decode", 100, "디코딩 완료"))
-        streaming.close()
 
         runWhisperAndSrt(context, wavFile, model, sourceLang, targetLang, onProgress, onSegment, url)
     }
@@ -236,6 +215,15 @@ object SubtitlePipeline {
     }
 
     // ================== 유틸 ==================
+    private fun guessExt(mime: String?): String = when {
+        mime == null -> "m4a"
+        mime.contains("mp4") || mime.contains("m4a") || mime.contains("aac") -> "m4a"
+        mime.contains("webm") -> "webm"
+        mime.contains("ogg") -> "ogg"
+        mime.contains("mpeg") -> "mp3"
+        else -> "m4a"
+    }
+
     private fun copyToCache(context: Context, uri: Uri): File? = try {
         val name = queryFileName(context, uri) ?: "input_${System.currentTimeMillis()}"
         val ext = name.substringAfterLast('.', "bin")

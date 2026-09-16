@@ -14,8 +14,8 @@ import java.util.concurrent.TimeUnit
 object StreamDownloader {
 
     private const val TAG = "StreamDownloader"
-    private const val MAX_RETRY = 5
-    private const val CHUNK = 256 * 1024
+    private const val MAX_RETRY = 10
+    private const val CHUNK = 512 * 1024
 
     private val client = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
@@ -42,29 +42,29 @@ object StreamDownloader {
             try {
                 val reqBuilder = Request.Builder()
                     .url(streamUrl)
-                    .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+                    .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
                     .header("Accept", "*/*")
                     .header("Accept-Encoding", "identity")
                     .header("Connection", "keep-alive")
 
                 if (downloaded > 0) {
                     reqBuilder.header("Range", "bytes=$downloaded-")
-                    LogBus.log(TAG, "재개 시도 #${attempt + 1} ($downloaded bytes 부터)")
+                    LogBus.log(TAG, "이어받기 #${attempt + 1} @ $downloaded")
                 } else {
                     LogBus.log(TAG, "다운로드 시작 #${attempt + 1}")
                 }
 
                 client.newCall(reqBuilder.build()).execute().use { resp ->
-                    if (!resp.isSuccessful && resp.code != 206) {
+                    val isPartial = resp.code == 206
+                    if (!resp.isSuccessful && !isPartial) {
                         LogBus.log(TAG, "HTTP ${resp.code}")
                         return@withContext null
                     }
 
                     val body = resp.body ?: return@withContext null
 
-                    // 전체 크기 (206 이면 Content-Range 에서, 아니면 Content-Length)
                     if (total < 0) {
-                        total = if (resp.code == 206) {
+                        total = if (isPartial) {
                             val cr = resp.header("Content-Range") ?: ""
                             cr.substringAfterLast('/').toLongOrNull() ?: -1L
                         } else {
@@ -73,24 +73,25 @@ object StreamDownloader {
                         LogBus.log(TAG, "총 크기: $total bytes")
                     }
 
+                    // 이어받기: 새 응답이 206이면 seek, 아니면 0부터
+                    val startPos = if (isPartial) downloaded else 0L
+                    if (!isPartial) downloaded = 0L
+
                     body.byteStream().use { input ->
                         RandomAccessFile(dest, "rw").use { raf ->
-                            raf.seek(downloaded)
+                            raf.seek(startPos)
                             val buf = ByteArray(CHUNK)
-                            var lastReport = 0L
+                            var lastPct = -1
                             while (true) {
                                 val n = input.read(buf)
                                 if (n <= 0) break
                                 raf.write(buf, 0, n)
                                 downloaded += n
-
                                 if (total > 0) {
-                                    val p = downloaded.toFloat() / total
-                                    // 1% 단위로만 콜백
-                                    val pct = (p * 100).toInt()
-                                    if (pct.toLong() != lastReport) {
-                                        lastReport = pct.toLong()
-                                        onProgress(p)
+                                    val pct = (downloaded * 100 / total).toInt()
+                                    if (pct != lastPct) {
+                                        lastPct = pct
+                                        onProgress(downloaded.toFloat() / total)
                                     }
                                 }
                             }
@@ -98,30 +99,26 @@ object StreamDownloader {
                     }
                 }
 
-                // 완료 확인
                 if (total > 0 && downloaded >= total) {
                     LogBus.log(TAG, "완료: ${dest.length()} bytes")
                     onProgress(1f)
                     return@withContext dest
                 } else if (total < 0) {
-                    // 크기 모를 때: 그냥 완료
                     LogBus.log(TAG, "완료 (크기 미상): ${dest.length()} bytes")
                     onProgress(1f)
                     return@withContext dest
                 } else {
                     LogBus.log(TAG, "불완전 ($downloaded / $total), 재시도")
                 }
-
             } catch (e: Exception) {
                 LogBus.log(TAG, "예외 #${attempt + 1}: ${e.message}")
             }
 
             attempt++
             if (attempt < MAX_RETRY) {
-                delay(1000L * attempt)  // 점진적 백오프
+                delay(1000L * attempt)
             }
         }
-
         LogBus.log(TAG, "최대 재시도 초과")
         null
     }
