@@ -12,8 +12,8 @@ android {
         applicationId = "com.mdkdw1.splayer"
         minSdk = 24
         targetSdk = 34
-        versionCode = 7
-        versionName = "0.7.0"
+        versionCode = 8
+        versionName = "0.8.0"
 
         // Groq API 키 (GitHub Secret 에서 주입)
         buildConfigField(
