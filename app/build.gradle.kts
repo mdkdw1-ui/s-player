@@ -12,8 +12,15 @@ android {
         applicationId = "com.mdkdw1.splayer"
         minSdk = 24
         targetSdk = 34
-        versionCode = 6
-        versionName = "0.6.0"
+        versionCode = 7
+        versionName = "0.7.0"
+
+        // Groq API 키 (GitHub Secret 에서 주입)
+        buildConfigField(
+            "String",
+            "GROQ_API_KEY",
+            "\"${System.getenv("GROQ_API_KEY") ?: ""}\""
+        )
 
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a")
