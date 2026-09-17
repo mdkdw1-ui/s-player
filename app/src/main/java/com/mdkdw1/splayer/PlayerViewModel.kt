@@ -132,7 +132,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     // ============ Whisper 모델 ============
     fun refreshWhisperStatus() {
         val m = _whisperModel.value.model
-        val installed = WhisperModelDownloader.isInstalled(getApplication(), m)
+        val installed = if (m.isCloud) true else WhisperModelDownloader.isInstalled(getApplication(), m)
         _whisperModel.value = _whisperModel.value.copy(installed = installed, error = null)
     }
 
@@ -143,6 +143,10 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
 
     fun downloadWhisperModel() {
         val m = _whisperModel.value.model
+        if (m.isCloud) {
+            LogBus.log("VM", "클라우드 모델은 다운로드 불필요")
+            return
+        }
         if (_whisperModel.value.downloading) return
         _whisperModel.value = _whisperModel.value.copy(downloading = true, progress = 0f, error = null)
         viewModelScope.launch {

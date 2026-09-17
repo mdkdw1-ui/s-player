@@ -227,8 +227,8 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel()) {
             }
         }
 
-        // ===== Whisper 모델 미설치 배너 =====
-        if (modelFolderReady && !whisperModel.installed) {
+        // ===== Whisper 모델 미설치 배너 (클라우드는 스킵) =====
+        if (!whisperModel.model.isCloud && modelFolderReady && !whisperModel.installed) {
             Card(
                 colors = CardDefaults.cardColors(
                     containerColor = MaterialTheme.colorScheme.primaryContainer
