@@ -142,8 +142,8 @@ object SubtitlePipeline {
         onLanguageDetected: (String) -> Unit
     ): File? {
 
-        val rawSegments: List<Pair<Long, Long>> = emptyList()  // (start, end) placeholder
-        val rawTexts: MutableList<Triple<Long, Long, String>> = mutableListOf()
+        // STT 결과 임시 저장 (startMs, endMs, text)
+        val rawTexts = mutableListOf<Triple<Long, Long, String>>()
         var detectedLang: String? = null
 
         if (model.isCloud) {
@@ -218,7 +218,6 @@ object SubtitlePipeline {
                 return null
             }
 
-            // 큐에서 세그먼트 꺼내기
             while (true) {
                 val s = try { queue.poll() } catch (e: Exception) { null } ?: break
                 rawTexts.add(s)
@@ -252,16 +251,17 @@ object SubtitlePipeline {
 
             val seg = Segment(start, end, text, translated)
             synchronized(lock) { collected.add(seg) }
-            onSegment(seg)
             onProgress(Progress("translate", (i+1) * 100 / total.coerceAtLeast(1), "번역 ${i+1}/$total"))
         }
 
-        val rawSegments = synchronized(lock) { collected.toList() }
-        LogBus.log(TAG, "원본: ${rawSegments.size} 세그먼트")
-
-        // 세그먼트 병합 (가독성)
-        val finalSegments = mergeSegments(rawSegments)
+        // 병합
+        val rawList = synchronized(lock) { collected.toList() }
+        LogBus.log(TAG, "원본: ${rawList.size} 세그먼트")
+        val finalSegments = mergeSegments(rawList)
         LogBus.log(TAG, "병합 후: ${finalSegments.size} 세그먼트")
+
+        // 최종 UI 반영
+        finalSegments.forEach { onSegment(it) }
 
         val srtFile = File(AudioPaths.subtitleDir(context), "test_${targetLang}.srt")
         writeSrt(srtFile, finalSegments)
@@ -276,12 +276,6 @@ object SubtitlePipeline {
     }
 
     // ================== 세그먼트 병합 ==================
-    /**
-     * 자막 가독성을 위해 세그먼트 병합.
-     * - 최소 표시 시간 1.5초
-     * - 최대 표시 시간 6초
-     * - 최대 글자 수 80자 (한국어 기준)
-     */
     private fun mergeSegments(segments: List<Segment>): List<Segment> {
         if (segments.isEmpty()) return segments
 
