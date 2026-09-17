@@ -208,7 +208,10 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     fun runLocalStt(uri: Uri) {
         if (_sttState.value.running) return
         val model = _whisperModel.value.model
-        if (!_whisperModel.value.installed) { LogBus.log("STT", "모델 미설치"); return }
+        if (!model.isCloud && !_whisperModel.value.installed) {
+            LogBus.log("STT", "로컬 모델 미설치")
+            return
+        }
 
         resetSegmentBuffer()
         _sttState.value = SttState(running = true, stage = "start", percent = 0)
@@ -239,7 +242,10 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     fun runUrlStt(url: String) {
         if (_sttState.value.running) return
         val model = _whisperModel.value.model
-        if (!_whisperModel.value.installed) { LogBus.log("STT", "모델 미설치"); return }
+        if (!model.isCloud && !_whisperModel.value.installed) {
+            LogBus.log("STT", "로컬 모델 미설치")
+            return
+        }
 
         resetSegmentBuffer()
         _sttState.value = SttState(running = true, stage = "start", percent = 0)

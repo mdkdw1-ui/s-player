@@ -43,6 +43,8 @@ jobs:
           gradle-version: '8.7'
 
       - name: Build with Gradle
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
         run: gradle assembleDebug
 
       - name: Upload APK

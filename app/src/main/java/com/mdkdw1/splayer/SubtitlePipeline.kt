@@ -37,7 +37,7 @@ object SubtitlePipeline {
         onSegment: (Segment) -> Unit,
         onLanguageDetected: (String) -> Unit = {}
     ): File? = withContext(Dispatchers.IO) {
-        LogBus.log(TAG, "=== 로컬 START (sourceLang=$sourceLang)")
+        LogBus.log(TAG, "=== 로컬 START (model=${model.id}, sourceLang=$sourceLang)")
 
         onProgress(Progress("copy", 0, "파일 복사 중..."))
         val inputFile = copyToCache(context, sourceUri)
@@ -58,7 +58,7 @@ object SubtitlePipeline {
         }
         onProgress(Progress("decode", 100, "디코딩 완료"))
 
-        runWhisperAndSrt(context, wavFile, model, sourceLang, targetLang, onProgress, onSegment, null, onLanguageDetected)
+        runSttAndTranslate(context, wavFile, model, sourceLang, targetLang, onProgress, onSegment, null, onLanguageDetected)
     }
 
     // ================== URL ==================
@@ -73,7 +73,7 @@ object SubtitlePipeline {
         onStreamInfo: (StreamResult) -> Unit = {},
         onLanguageDetected: (String) -> Unit = {}
     ): File? = withContext(Dispatchers.IO) {
-        LogBus.log(TAG, "=== URL START (sourceLang=$sourceLang): $url")
+        LogBus.log(TAG, "=== URL START (model=${model.id}, sourceLang=$sourceLang): $url")
 
         // 캐시 확인
         if (SubtitleCache.exists(context, url, targetLang)) {
@@ -126,11 +126,11 @@ object SubtitlePipeline {
         }
         onProgress(Progress("decode", 100, "디코딩 완료"))
 
-        runWhisperAndSrt(context, wavFile, model, sourceLang, targetLang, onProgress, onSegment, url, onLanguageDetected)
+        runSttAndTranslate(context, wavFile, model, sourceLang, targetLang, onProgress, onSegment, url, onLanguageDetected)
     }
 
-    // ================== 공통 ==================
-    private suspend fun runWhisperAndSrt(
+    // ================== STT + 번역 공통 ==================
+    private suspend fun runSttAndTranslate(
         context: Context,
         wavFile: File,
         model: WhisperModel,
@@ -141,94 +141,120 @@ object SubtitlePipeline {
         cacheSourceKey: String?,
         onLanguageDetected: (String) -> Unit
     ): File? {
-        if (!WhisperModelDownloader.isInstalled(context, model)) {
-            onProgress(Progress("error", 0, "모델 미설치 (저장 폴더 미지정 or 다운로드 필요)"))
-            return null
-        }
-        // 캐시에 복사본 확보 (JNI 가 file path 요구)
-        val cachedModel = WhisperModelStorage.copyToCache(context, model)
-        if (cachedModel == null || !cachedModel.exists()) {
-            onProgress(Progress("error", 0, "모델 캐시 복사 실패"))
-            return null
-        }
-        val modelPath = cachedModel.absolutePath
-        LogBus.log(TAG, "모델 경로: $modelPath (${cachedModel.length()} bytes)")
 
-        val collected = mutableListOf<Segment>()
-        val translator = GoogleTranslator()
-        val queue = java.util.concurrent.LinkedBlockingQueue<Segment>()
-        val lock = Object()
-
+        val rawSegments: List<Pair<Long, Long>> = emptyList()  // (start, end) placeholder
+        val rawTexts: MutableList<Triple<Long, Long, String>> = mutableListOf()
         var detectedLang: String? = null
 
-        onProgress(Progress("stt", 0, "음성 인식 중... (모델: ${model.displayName})"))
-        val threads = Runtime.getRuntime().availableProcessors().coerceAtMost(8)
+        if (model.isCloud) {
+            // ===== Groq =====
+            onProgress(Progress("stt", 0, "Groq 업로드 중... (${model.displayName})"))
 
-        val sttOk = try {
-            WhisperBridge.transcribe(
-                modelPath = modelPath,
-                wavPath = wavFile.absolutePath,
-                language = sourceLang,
-                threads = threads,
-                callback = object : WhisperBridge.SegmentCallback {
-                    override fun onSegment(startMs: Long, endMs: Long, text: String) {
-                        val t = text.trim()
-                        if (t.isEmpty()) return
-                        queue.put(Segment(startMs, endMs, t, ""))
-                    }
-                    override fun onProgress(percent: Int) {
-                        // 5% 단위로만 갱신 (스팸 방지)
-                        if (percent % 5 == 0 || percent >= 99) {
-                            onProgress(Progress("stt", percent, "인식 중 $percent%"))
+            val groqResult = GroqStt.transcribe(wavFile, sourceLang) { p ->
+                onProgress(Progress("stt", p, "Groq 처리 중 $p%"))
+            }
+
+            if (groqResult == null) {
+                onProgress(Progress("error", 0, "Groq 실패"))
+                return null
+            }
+
+            detectedLang = groqResult.language
+            detectedLang?.let { onLanguageDetected(it) }
+
+            groqResult.segments.forEach { s ->
+                rawTexts.add(Triple(s.startMs, s.endMs, s.text))
+            }
+            LogBus.log(TAG, "Groq 세그먼트: ${rawTexts.size}개, 언어=${detectedLang}")
+
+        } else {
+            // ===== 로컬 Whisper =====
+            if (!WhisperModelDownloader.isInstalled(context, model)) {
+                onProgress(Progress("error", 0, "모델 미설치"))
+                return null
+            }
+            val cachedModel = WhisperModelStorage.copyToCache(context, model)
+            if (cachedModel == null || !cachedModel.exists()) {
+                onProgress(Progress("error", 0, "모델 캐시 복사 실패"))
+                return null
+            }
+            val modelPath = cachedModel.absolutePath
+            LogBus.log(TAG, "로컬 모델: $modelPath")
+
+            onProgress(Progress("stt", 0, "음성 인식 중..."))
+            val threads = Runtime.getRuntime().availableProcessors().coerceAtMost(8)
+            val queue = java.util.concurrent.LinkedBlockingQueue<Triple<Long, Long, String>>()
+
+            val sttOk = try {
+                WhisperBridge.transcribe(
+                    modelPath = modelPath,
+                    wavPath = wavFile.absolutePath,
+                    language = sourceLang,
+                    threads = threads,
+                    callback = object : WhisperBridge.SegmentCallback {
+                        override fun onSegment(startMs: Long, endMs: Long, text: String) {
+                            val t = text.trim()
+                            if (t.isEmpty()) return
+                            queue.put(Triple(startMs, endMs, t))
+                        }
+                        override fun onProgress(percent: Int) {
+                            if (percent % 5 == 0 || percent >= 99) {
+                                onProgress(Progress("stt", percent, "인식 중 $percent%"))
+                            }
+                        }
+                        override fun onComplete() {}
+                        override fun onLog(msg: String) { LogBus.log("JNI", msg) }
+                        override fun onLanguage(langCode: String) {
+                            detectedLang = langCode
+                            LogBus.log(TAG, "감지 언어: $langCode")
+                            onLanguageDetected(langCode)
                         }
                     }
-                    override fun onComplete() {}
-                    override fun onLog(msg: String) { LogBus.log("JNI", msg) }
-                    override fun onLanguage(langCode: String) {
-                        detectedLang = langCode
-                        LogBus.log(TAG, "감지 언어: $langCode")
-                        onLanguageDetected(langCode)
-                    }
-                }
-            )
-        } catch (e: Exception) { LogBus.log(TAG, "STT 예외: ${e.message}"); false }
+                )
+            } catch (e: Exception) { LogBus.log(TAG, "STT 예외: ${e.message}"); false }
 
-        if (!sttOk) {
-            onProgress(Progress("error", 0, "STT 실패"))
-            return null
+            if (!sttOk) {
+                onProgress(Progress("error", 0, "STT 실패"))
+                return null
+            }
+
+            // 큐에서 세그먼트 꺼내기
+            while (true) {
+                val s = try { queue.poll() } catch (e: Exception) { null } ?: break
+                rawTexts.add(s)
+            }
         }
 
-        // 번역 소스 결정: 수동 선택 > 감지 언어 > 기본
+        // ===== 번역 =====
         val actualSource = when {
-            sourceLang != "auto" -> sourceLang       // 수동 선택 우선
-            detectedLang != null -> detectedLang!!   // 감지 언어
-            else -> "en"                             // 기본
+            sourceLang != "auto" -> sourceLang
+            detectedLang != null -> detectedLang!!
+            else -> "en"
         }
         LogBus.log(TAG, "번역 시작 (source=$actualSource, target=$targetLang, detected=$detectedLang, manual=$sourceLang)")
         onProgress(Progress("translate", 0, "번역 중 ($actualSource → $targetLang)"))
 
-        // 번역 (Whisper 완료 후)
-        val translatorThread = Thread {
-            while (true) {
-                val seg = try { queue.take() } catch (e: Exception) { break }
-                if (seg.original == "__DONE__") break
-                val translated = try {
-                    if (targetLang == actualSource) seg.original
-                    else {
-                        val t = kotlinx.coroutines.runBlocking { translator.translate(seg.original, targetLang, actualSource) }
-                        // 번역 결과가 원문과 같으면 빈 문자열
-                        if (t == seg.original) "" else t
+        val translator = GoogleTranslator()
+        val collected = mutableListOf<Segment>()
+        val lock = Object()
+
+        val total = rawTexts.size
+        rawTexts.forEachIndexed { i, (start, end, text) ->
+            val translated = try {
+                if (targetLang == actualSource) text
+                else {
+                    val t = kotlinx.coroutines.runBlocking {
+                        translator.translate(text, targetLang, actualSource)
                     }
-                } catch (e: Exception) { "" }
-                val finalSeg = seg.copy(translated = translated)
-                synchronized(lock) { collected.add(finalSeg) }
-                onSegment(finalSeg)
-                LogBus.log(TAG, "SEG [${finalSeg.startMs}ms] ${finalSeg.original.take(40)} → ${finalSeg.translated.take(40)}")
-            }
+                    if (t == text) "" else t
+                }
+            } catch (e: Exception) { "" }
+
+            val seg = Segment(start, end, text, translated)
+            synchronized(lock) { collected.add(seg) }
+            onSegment(seg)
+            onProgress(Progress("translate", (i+1) * 100 / total.coerceAtLeast(1), "번역 ${i+1}/$total"))
         }
-        translatorThread.start()
-        queue.put(Segment(0, 0, "__DONE__", ""))
-        try { translatorThread.join(5000) } catch (_: Exception) {}
 
         val finalSegments = synchronized(lock) { collected.toList() }
         LogBus.log(TAG, "완료: ${finalSegments.size} 세그먼트")
