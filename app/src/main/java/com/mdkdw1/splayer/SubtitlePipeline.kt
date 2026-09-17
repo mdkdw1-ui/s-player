@@ -37,7 +37,8 @@ object SubtitlePipeline {
         onSegment: (Segment) -> Unit,
         onLanguageDetected: (String) -> Unit = {}
     ): File? = withContext(Dispatchers.IO) {
-        LogBus.log(TAG, "=== 로컬 START")
+        LogBus.log(TAG, "=== 로컬 START (sourceLang=$sourceLang)")
+
         onProgress(Progress("copy", 0, "파일 복사 중..."))
         val inputFile = copyToCache(context, sourceUri)
         if (inputFile == null) {
@@ -72,7 +73,7 @@ object SubtitlePipeline {
         onStreamInfo: (StreamResult) -> Unit = {},
         onLanguageDetected: (String) -> Unit = {}
     ): File? = withContext(Dispatchers.IO) {
-        LogBus.log(TAG, "=== URL START: $url")
+        LogBus.log(TAG, "=== URL START (sourceLang=$sourceLang): $url")
 
         // 캐시 확인
         if (SubtitleCache.exists(context, url, targetLang)) {
@@ -85,7 +86,7 @@ object SubtitlePipeline {
             }
         }
 
-        // 1. 스트림 추출
+        // 스트림 추출
         onProgress(Progress("extract", 0, "영상 정보 추출 중..."))
         val info = StreamExtractor.extract(url).getOrNull()
         if (info == null) {
@@ -102,7 +103,7 @@ object SubtitlePipeline {
         }
         val ext = guessExt(info.audioMimeType ?: info.videoMimeType)
 
-        // 2. 순차 다운로드
+        // 다운로드
         onProgress(Progress("download", 0, "다운로드 시작..."))
         val audioFile = StreamDownloader.download(context, audioUrl, "url_input", ext) { p ->
             onProgress(Progress("download", (p * 100).toInt(), "다운로드 ${(p*100).toInt()}%"))
@@ -111,27 +112,24 @@ object SubtitlePipeline {
             onProgress(Progress("error", 0, "다운로드 실패"))
             return@withContext null
         }
-        onProgress(Progress("download", 100, "다운로드 완료 (${audioFile.length() / 1024}KB)"))
+        onProgress(Progress("download", 100, "다운로드 완료"))
 
-        // 3. 디코딩
+        // 디코딩
         onProgress(Progress("decode", 0, "오디오 디코딩 중..."))
         val wavFile = AudioPaths.tempWav(context, "test")
         if (wavFile.exists()) wavFile.delete()
         val decodeOk = try { AudioDecoder.decodeToWav(audioFile, wavFile) }
-        catch (e: Exception) {
-            LogBus.log(TAG, "디코딩 예외: ${e.message}"); false
-        }
+        catch (e: Exception) { LogBus.log(TAG, "디코딩 예외: ${e.message}"); false }
         if (!decodeOk || !wavFile.exists()) {
             onProgress(Progress("error", 0, "디코딩 실패"))
             return@withContext null
         }
-        LogBus.log(TAG, "WAV: ${wavFile.length()} bytes")
         onProgress(Progress("decode", 100, "디코딩 완료"))
 
         runWhisperAndSrt(context, wavFile, model, sourceLang, targetLang, onProgress, onSegment, url, onLanguageDetected)
     }
 
-    // ================== 공통: Whisper + 번역 + SRT ==================
+    // ================== 공통 ==================
     private suspend fun runWhisperAndSrt(
         context: Context,
         wavFile: File,
@@ -141,7 +139,7 @@ object SubtitlePipeline {
         onProgress: (Progress) -> Unit,
         onSegment: (Segment) -> Unit,
         cacheSourceKey: String?,
-        onLanguageDetected: (String) -> Unit = {}
+        onLanguageDetected: (String) -> Unit
     ): File? {
         if (!WhisperModelDownloader.isInstalled(context, model)) {
             onProgress(Progress("error", 0, "모델 미설치"))
@@ -154,14 +152,9 @@ object SubtitlePipeline {
         val queue = java.util.concurrent.LinkedBlockingQueue<Segment>()
         val lock = Object()
 
-        // Whisper 가 감지한 원본 언어 (콜백으로 채워짐)
         var detectedLang: String? = null
 
-        // 번역 스레드는 Whisper 완료 후 시작 (감지 언어 확정 후)
-        // 지금은 세그먼트만 모아둠
-        var translatorThread: Thread? = null
-
-        onProgress(Progress("stt", 0, "음성 인식 중..."))
+        onProgress(Progress("stt", 0, "음성 인식 중... (모델: ${model.displayName})"))
         val threads = Runtime.getRuntime().availableProcessors().coerceAtMost(8)
 
         val sttOk = try {
@@ -190,12 +183,22 @@ object SubtitlePipeline {
             )
         } catch (e: Exception) { LogBus.log(TAG, "STT 예외: ${e.message}"); false }
 
-        // Whisper 완료 후 번역 시작
-        // 수동 선택이 있으면 그걸 최우선, 없으면 감지 언어, 마지막으로 sourceLang
-        val actualSource = if (sourceLang != "auto") sourceLang
-                          else detectedLang ?: "en"
-        LogBus.log(TAG, "번역 시작 (source=$actualSource, target=$targetLang, detected=$detectedLang)")
-        translatorThread = Thread {
+        if (!sttOk) {
+            onProgress(Progress("error", 0, "STT 실패"))
+            return null
+        }
+
+        // 번역 소스 결정: 수동 선택 > 감지 언어 > 기본
+        val actualSource = when {
+            sourceLang != "auto" -> sourceLang       // 수동 선택 우선
+            detectedLang != null -> detectedLang!!   // 감지 언어
+            else -> "en"                             // 기본
+        }
+        LogBus.log(TAG, "번역 시작 (source=$actualSource, target=$targetLang, detected=$detectedLang, manual=$sourceLang)")
+        onProgress(Progress("translate", 0, "번역 중 ($actualSource → $targetLang)"))
+
+        // 번역 (Whisper 완료 후)
+        val translatorThread = Thread {
             while (true) {
                 val seg = try { queue.take() } catch (e: Exception) { break }
                 if (seg.original == "__DONE__") break
@@ -203,24 +206,19 @@ object SubtitlePipeline {
                     if (targetLang == actualSource) seg.original
                     else {
                         val t = kotlinx.coroutines.runBlocking { translator.translate(seg.original, targetLang, actualSource) }
-                        // 번역 결과가 원문과 같으면 빈 문자열 (원문 표시만)
+                        // 번역 결과가 원문과 같으면 빈 문자열
                         if (t == seg.original) "" else t
                     }
                 } catch (e: Exception) { "" }
                 val finalSeg = seg.copy(translated = translated)
                 synchronized(lock) { collected.add(finalSeg) }
                 onSegment(finalSeg)
-                LogBus.log(TAG, "SEG [${finalSeg.startMs}ms] ${finalSeg.original.take(40)}")
+                LogBus.log(TAG, "SEG [${finalSeg.startMs}ms] ${finalSeg.original.take(40)} → ${finalSeg.translated.take(40)}")
             }
         }
         translatorThread.start()
         queue.put(Segment(0, 0, "__DONE__", ""))
         try { translatorThread.join(5000) } catch (_: Exception) {}
-
-        if (!sttOk) {
-            onProgress(Progress("error", 0, "STT 실패"))
-            return null
-        }
 
         val finalSegments = synchronized(lock) { collected.toList() }
         LogBus.log(TAG, "완료: ${finalSegments.size} 세그먼트")
