@@ -142,10 +142,17 @@ object SubtitlePipeline {
         onLanguageDetected: (String) -> Unit
     ): File? {
         if (!WhisperModelDownloader.isInstalled(context, model)) {
-            onProgress(Progress("error", 0, "모델 미설치"))
+            onProgress(Progress("error", 0, "모델 미설치 (저장 폴더 미지정 or 다운로드 필요)"))
             return null
         }
-        val modelPath = WhisperModelDownloader.modelFile(context, model).absolutePath
+        // 캐시에 복사본 확보 (JNI 가 file path 요구)
+        val cachedModel = WhisperModelStorage.copyToCache(context, model)
+        if (cachedModel == null || !cachedModel.exists()) {
+            onProgress(Progress("error", 0, "모델 캐시 복사 실패"))
+            return null
+        }
+        val modelPath = cachedModel.absolutePath
+        LogBus.log(TAG, "모델 경로: $modelPath (${cachedModel.length()} bytes)")
 
         val collected = mutableListOf<Segment>()
         val translator = GoogleTranslator()

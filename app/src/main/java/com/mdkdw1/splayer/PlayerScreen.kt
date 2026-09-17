@@ -215,6 +215,11 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel()) {
                         whisperModel.model.description + if (whisperModel.model.recommended) " ⭐ 권장" else "",
                         style = MaterialTheme.typography.bodySmall
                     )
+                    Text(
+                        "저장: /Android/data/${ctx.packageName}/files/models/",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                     Spacer(Modifier.height(8.dp))
                     if (whisperModel.downloading) {
                         LinearProgressIndicator(

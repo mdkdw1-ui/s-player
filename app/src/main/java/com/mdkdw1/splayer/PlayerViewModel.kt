@@ -98,6 +98,13 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     private val _sourceLang = MutableStateFlow(SttSourceLang.AUTO)
     val sourceLang: StateFlow<SttSourceLang> = _sourceLang
 
+    // 모델 저장 폴더 상태
+    private val _modelFolderReady = MutableStateFlow(false)
+    val modelFolderReady: StateFlow<Boolean> = _modelFolderReady
+
+    private val _modelFolderName = MutableStateFlow("(미지정)")
+    val modelFolderName: StateFlow<String> = _modelFolderName
+
     // 감지된 언어 (자동 감지 시 표시용)
     private val _detectedLang = MutableStateFlow<String?>(null)
     val detectedLang: StateFlow<String?> = _detectedLang
@@ -112,6 +119,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     init {
         refreshModelStatus()
         refreshWhisperStatus()
+        refreshModelFolder()
         LogBus.log("VM", "init")
 
         AudioCaptureService.onSamples = { samples, rate ->
@@ -172,6 +180,23 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         synchronized(segmentBuffer) {
             _sttState.value = _sttState.value.copy(segments = segmentBuffer.toList())
         }
+    }
+
+    fun refreshModelFolder() {
+        val ready = WhisperModelStorage.isFolderReady(getApplication())
+        _modelFolderReady.value = ready
+        _modelFolderName.value = WhisperModelStorage.folderDisplayName(getApplication())
+        LogBus.log("VM", "model folder ready=$ready name=${_modelFolderName.value}")
+    }
+
+    fun setModelFolder(uri: Uri) {
+        WhisperModelStorage.saveTreeUri(getApplication(), uri)
+        refreshModelFolder()
+    }
+
+    fun clearModelFolder() {
+        WhisperModelStorage.clearTreeUri(getApplication())
+        refreshModelFolder()
     }
 
     fun setSourceLang(lang: SttSourceLang) {
