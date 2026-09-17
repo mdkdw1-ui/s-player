@@ -1,6 +1,5 @@
 package com.mdkdw1.splayer
 
-import android.content.Intent
 import android.net.Uri
 import android.webkit.WebView
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -13,7 +12,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.BugReport
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.MoreVert
@@ -53,6 +52,8 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel()) {
     val sttState by vm.sttState.collectAsState()
     val sourceLang by vm.sourceLang.collectAsState()
     val detectedLang by vm.detectedLang.collectAsState()
+    val modelFolderReady by vm.modelFolderReady.collectAsState()
+    val modelFolderName by vm.modelFolderName.collectAsState()
 
     var webViewRef by remember { mutableStateOf<WebView?>(null) }
     var langMenuOpen by remember { mutableStateOf(false) }
@@ -71,6 +72,17 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel()) {
         onDenied = { LogBus.log("CAP", "권한 거부됨") }
     )
 
+    // SAF 폴더 선택
+    val folderPicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocumentTree()
+    ) { uri: Uri? ->
+        if (uri != null) {
+            vm.setModelFolder(uri)
+            LogBus.log("UI", "폴더 지정: $uri")
+        }
+    }
+
+    // 파일 선택 (로컬 STT)
     val filePicker = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocument()
     ) { uri: Uri? ->
@@ -96,19 +108,19 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel()) {
             navigationIcon = {
                 if (mode == PlayerMode.WEBVIEW) {
                     IconButton(onClick = { webViewRef?.goBack() }) {
-                        Icon(Icons.Default.ArrowBack, contentDescription = "뒤로")
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "뒤로")
                     }
                 }
             },
             actions = {
-                // 파일 선택 (STT)
+                // 파일 STT
                 IconButton(onClick = {
                     filePicker.launch(arrayOf("audio/*", "video/*"))
                 }) {
                     Icon(Icons.Default.Folder, contentDescription = "파일 STT")
                 }
 
-                // URL STT (Translate)
+                // URL STT
                 if (urlInput.isNotBlank()) {
                     IconButton(onClick = {
                         vm.runUrlStt(urlInput)
@@ -118,7 +130,7 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel()) {
                     }
                 }
 
-                // 더보기 메뉴 (나머지 다 여기로)
+                // 더보기
                 Box {
                     IconButton(onClick = { moreMenuOpen = true }) {
                         Icon(Icons.Default.MoreVert, contentDescription = "더보기")
@@ -127,34 +139,28 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel()) {
                         expanded = moreMenuOpen,
                         onDismissRequest = { moreMenuOpen = false }
                     ) {
-                        // Whisper 모델
                         DropdownMenuItem(
                             text = { Text("Whisper: ${whisperModel.model.displayName}") },
                             onClick = { whisperMenuOpen = true; moreMenuOpen = false }
                         )
-                        // 언어
                         DropdownMenuItem(
                             text = { Text("언어: ${modelStatus.language.displayName}") },
                             onClick = { langMenuOpen = true; moreMenuOpen = false }
                         )
-                        // 새로고침
                         if (mode == PlayerMode.WEBVIEW) {
                             DropdownMenuItem(
                                 text = { Text("새로고침") },
                                 onClick = { webViewRef?.reload(); moreMenuOpen = false }
                             )
                         }
-                        // 로그
                         DropdownMenuItem(
                             text = { Text("로그") },
                             onClick = { logPanelOpen = !logPanelOpen; moreMenuOpen = false }
                         )
-                        // 캐시 목록
                         DropdownMenuItem(
                             text = { Text("캐시 목록") },
                             onClick = { cachePanelOpen = true; moreMenuOpen = false }
                         )
-                        // 캡처 (실시간, 지금은 스텁)
                         DropdownMenuItem(
                             text = { Text(if (captureOn) "캡처 중지" else "캡처 시작") },
                             onClick = {
@@ -168,7 +174,7 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel()) {
             }
         )
 
-        // Whisper 모델 선택 서브메뉴
+        // Whisper 모델 서브메뉴
         DropdownMenu(
             expanded = whisperMenuOpen,
             onDismissRequest = { whisperMenuOpen = false }
@@ -184,7 +190,7 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel()) {
             }
         }
 
-        // 언어 선택 서브메뉴
+        // 언어 서브메뉴
         DropdownMenu(
             expanded = langMenuOpen,
             onDismissRequest = { langMenuOpen = false }
@@ -197,9 +203,32 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel()) {
             }
         }
 
-        // 이하 UI는 이전과 동일 (모델 배너, STT 진행률, 주소창, 배속 슬라이더, 영상 영역, 로그 패널)
-        // ... (생략하지 않고 전체 복사)
-        if (!whisperModel.installed) {
+        // ===== 모델 저장 폴더 미지정 안내 =====
+        if (!modelFolderReady) {
+            Card(
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.tertiaryContainer
+                ),
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp)
+            ) {
+                Column(modifier = Modifier.padding(12.dp)) {
+                    Text("모델 저장 폴더를 선택하세요", style = MaterialTheme.typography.bodyMedium)
+                    Text(
+                        "Download/SPlayer 폴더 권장 (PC에서 접근 가능)",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(onClick = { folderPicker.launch(null) }) {
+                            Text("📂 폴더 선택")
+                        }
+                    }
+                }
+            }
+        }
+
+        // ===== Whisper 모델 미설치 배너 =====
+        if (modelFolderReady && !whisperModel.installed) {
             Card(
                 colors = CardDefaults.cardColors(
                     containerColor = MaterialTheme.colorScheme.primaryContainer
@@ -208,7 +237,7 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel()) {
             ) {
                 Column(modifier = Modifier.padding(12.dp)) {
                     Text(
-                        "Whisper ${whisperModel.model.displayName} 모델 필요 (${whisperModel.model.sizeMb}MB)",
+                        "Whisper ${whisperModel.model.displayName} 모델 (${whisperModel.model.sizeMb}MB)",
                         style = MaterialTheme.typography.bodyMedium
                     )
                     Text(
@@ -216,7 +245,7 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel()) {
                         style = MaterialTheme.typography.bodySmall
                     )
                     Text(
-                        "저장: /Android/data/${ctx.packageName}/files/models/",
+                        "저장 위치: $modelFolderName",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -231,6 +260,7 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel()) {
                     } else {
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             Button(onClick = { vm.downloadWhisperModel() }) { Text("다운로드") }
+                            TextButton(onClick = { folderPicker.launch(null) }) { Text("폴더 변경") }
                             whisperModel.error?.let {
                                 Text(it, color = MaterialTheme.colorScheme.error)
                             }
@@ -240,6 +270,7 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel()) {
             }
         }
 
+        // STT 진행률 (실행 중)
         AnimatedVisibility(visible = sttState.running) {
             Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp)) {
                 LinearProgressIndicator(
@@ -251,6 +282,7 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel()) {
             }
         }
 
+        // 주소창
         if (mode == PlayerMode.WEBVIEW && !sttPanelOpen) {
             OutlinedTextField(
                 value = urlInput,
@@ -266,6 +298,7 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel()) {
             )
         }
 
+        // 배속 슬라이더
         Row(
             modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -282,8 +315,10 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel()) {
             Text("4x", style = MaterialTheme.typography.labelMedium)
         }
 
+        // 본문 영역
         Box(modifier = Modifier.weight(1f)) {
             if (sttPanelOpen) {
+                // STT 결과 패널
                 Column(modifier = Modifier.fillMaxSize().background(Color(0xFF111111))) {
                     Row(
                         modifier = Modifier.fillMaxWidth().padding(8.dp),
@@ -291,7 +326,8 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel()) {
                     ) {
                         Text("STT 결과 (${sttState.segments.size})", color = Color.White, fontSize = 13.sp)
                         Spacer(Modifier.width(8.dp))
-                        // 소스 언어 선택
+
+                        // 언어 선택 드롭다운
                         Box {
                             TextButton(onClick = { sourceLangMenuOpen = true }) {
                                 val label = if (sourceLang == SttSourceLang.AUTO && detectedLang != null) {
@@ -316,22 +352,30 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel()) {
                                 }
                             }
                         }
+
                         Spacer(Modifier.weight(1f))
+
                         if (!sttState.running && sttState.srtPath != null) {
                             TextButton(onClick = {
-                                // 공유
                                 val f = java.io.File(sttState.srtPath!!)
                                 if (f.exists()) {
-                                    val intent = Intent(Intent.ACTION_SEND).apply {
-                                        type = "application/x-subrip"
-                                        putExtra(Intent.EXTRA_STREAM, androidx.core.content.FileProvider.getUriForFile(
-                                            ctx,
-                                            "${ctx.packageName}.fileprovider",
-                                            f
-                                        ))
-                                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                    try {
+                                        val intent = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
+                                            type = "application/x-subrip"
+                                            putExtra(
+                                                android.content.Intent.EXTRA_STREAM,
+                                                androidx.core.content.FileProvider.getUriForFile(
+                                                    ctx,
+                                                    "${ctx.packageName}.fileprovider",
+                                                    f
+                                                )
+                                            )
+                                            addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                        }
+                                        ctx.startActivity(android.content.Intent.createChooser(intent, "자막 공유"))
+                                    } catch (e: Exception) {
+                                        LogBus.log("UI", "공유 실패: ${e.message}")
                                     }
-                                    ctx.startActivity(Intent.createChooser(intent, "자막 공유"))
                                 }
                             }) {
                                 Text("공유", fontSize = 12.sp)
@@ -344,7 +388,7 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel()) {
                             }
                         }
                         TextButton(onClick = { sttPanelOpen = false }) {
-                            Text("▼ 미니로", fontSize = 12.sp)
+                            Text("▼", fontSize = 12.sp)
                         }
                         TextButton(onClick = { vm.clearStt(); sttPanelOpen = false }) {
                             Text("✕", fontSize = 12.sp)
@@ -354,10 +398,12 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel()) {
                         items(sttState.segments) { seg ->
                             Column(modifier = Modifier.padding(vertical = 6.dp)) {
                                 Text("[${seg.startMs / 1000}s - ${seg.endMs / 1000}s]", color = Color.Gray, fontSize = 10.sp)
-                                Text(seg.original, color = Color(0xFFB0D0FF), fontSize = 12.sp)
+                                if (seg.original.isNotBlank()) {
+                                    Text(seg.original, color = Color(0xFFB0D0FF), fontSize = 12.sp)
+                                }
                                 Text(seg.translated, color = Color.White, fontSize = 14.sp)
                             }
-                            Divider(color = Color(0xFF333333))
+                            HorizontalDivider(color = Color(0xFF333333))
                         }
                     }
                 }
@@ -372,7 +418,9 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel()) {
                     PlayerMode.WEBVIEW -> WebViewBox(
                         loadUrl = loadUrl,
                         speed = speed,
-                        onCaption = { text -> vm.updateSubtitle(SubtitleCue(original = text, translated = "[번역] $text")) },
+                        onCaption = { text ->
+                            vm.updateSubtitle(SubtitleCue(original = text, translated = "[번역] $text"))
+                        },
                         onAudioChunk = { vm.onAudioChunk(it) },
                         onVideoFound = { vm.setVideoFound(it) },
                         onUrlChanged = { vm.onWebViewUrlChanged(it) },
@@ -385,56 +433,13 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel()) {
             }
         }
 
-        // 캐시 목록 패널
-        if (cachePanelOpen) {
-            val cacheFiles = remember { SubtitleCache.listAll(ctx) }
-            AlertDialog(
-                onDismissRequest = { cachePanelOpen = false },
-                title = { Text("자막 캐시 (${cacheFiles.size})") },
-                text = {
-                    LazyColumn(modifier = Modifier.height(300.dp)) {
-                        items(cacheFiles) { f ->
-                            Row(
-                                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Text(f.name, fontSize = 11.sp)
-                                    Text("${f.length() / 1024}KB", fontSize = 9.sp, color = Color.Gray)
-                                }
-                                TextButton(onClick = {
-                                    SubtitleCache.delete(ctx, f)
-                                    cachePanelOpen = false
-                                }) {
-                                    Text("삭제", fontSize = 11.sp)
-                                }
-                            }
-                            Divider()
-                        }
-                    }
-                },
-                confirmButton = {
-                    TextButton(onClick = { SubtitleCache.clearAll(ctx); cachePanelOpen = false }) {
-                        Text("전체 삭제")
-                    }
-                },
-                dismissButton = {
-                    TextButton(onClick = { cachePanelOpen = false }) {
-                        Text("닫기")
-                    }
-                }
-            )
-        }
-
-        // STT 진행 중이거나 결과가 있을 때, 패널 닫혀 있으면 하단 미니바
+        // STT 미니바
         if ((sttState.running || sttState.segments.isNotEmpty()) && !sttPanelOpen) {
             Card(
                 colors = CardDefaults.cardColors(
                     containerColor = MaterialTheme.colorScheme.primaryContainer
                 ),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 8.dp, vertical = 4.dp)
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp)
             ) {
                 Row(
                     modifier = Modifier.fillMaxWidth().padding(8.dp),
@@ -442,10 +447,12 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel()) {
                 ) {
                     Column(modifier = Modifier.weight(1f)) {
                         Text("[${sttState.stage}] ${sttState.message}", fontSize = 11.sp)
-                        LinearProgressIndicator(
-                            progress = { sttState.percent / 100f },
-                            modifier = Modifier.fillMaxWidth()
-                        )
+                        if (sttState.running) {
+                            LinearProgressIndicator(
+                                progress = { sttState.percent / 100f },
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                        }
                     }
                     TextButton(onClick = { sttPanelOpen = true }) {
                         Text("보기", fontSize = 11.sp)
@@ -454,6 +461,7 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel()) {
             }
         }
 
+        // 로그 패널
         if (logPanelOpen) {
             Column(
                 modifier = Modifier.fillMaxWidth().height(200.dp).background(Color(0xEE111111))
@@ -474,5 +482,46 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel()) {
                 }
             }
         }
+    }
+
+    // 캐시 목록 다이얼로그
+    if (cachePanelOpen) {
+        val cacheFiles = remember { SubtitleCache.listAll(ctx) }
+        AlertDialog(
+            onDismissRequest = { cachePanelOpen = false },
+            title = { Text("자막 캐시 (${cacheFiles.size})") },
+            text = {
+                LazyColumn(modifier = Modifier.height(300.dp)) {
+                    items(cacheFiles) { f ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(f.name, fontSize = 11.sp)
+                                Text("${f.length() / 1024}KB", fontSize = 9.sp, color = Color.Gray)
+                            }
+                            TextButton(onClick = {
+                                SubtitleCache.delete(ctx, f)
+                                cachePanelOpen = false
+                            }) {
+                                Text("삭제", fontSize = 11.sp)
+                            }
+                        }
+                        HorizontalDivider()
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { SubtitleCache.clearAll(ctx); cachePanelOpen = false }) {
+                    Text("전체 삭제")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { cachePanelOpen = false }) {
+                    Text("닫기")
+                }
+            }
+        )
     }
 }
