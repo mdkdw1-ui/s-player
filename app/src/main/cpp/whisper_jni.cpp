@@ -218,6 +218,8 @@ Java_com_mdkdw1_splayer_WhisperBridge_nativeTranscribe(
     params.no_context = true;
     params.new_segment_callback = new_segment_callback;
     params.new_segment_callback_user_data = &holder;
+    params.progress_callback = progress_callback;
+    params.progress_callback_user_data = &holder;
 
     kotlin_log(env, callback, onLog, "JNI: whisper_full 시작");
     int ret = whisper_full(ctx, params, wav.samples.data(), (int) wav.samples.size());

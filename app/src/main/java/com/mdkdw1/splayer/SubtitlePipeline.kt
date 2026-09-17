@@ -177,7 +177,10 @@ object SubtitlePipeline {
                         queue.put(Segment(startMs, endMs, t, ""))
                     }
                     override fun onProgress(percent: Int) {
-                        onProgress(Progress("stt", percent, "인식 중 $percent%"))
+                        // 5% 단위로만 갱신 (스팸 방지)
+                        if (percent % 5 == 0 || percent >= 99) {
+                            onProgress(Progress("stt", percent, "인식 중 $percent%"))
+                        }
                     }
                     override fun onComplete() {}
                     override fun onLog(msg: String) { LogBus.log("JNI", msg) }
