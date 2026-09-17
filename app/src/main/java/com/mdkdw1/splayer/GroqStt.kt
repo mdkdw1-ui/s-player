@@ -90,7 +90,9 @@ object GroqStt {
 
                 val json = JSONObject(bodyStr)
                 val text = json.optString("text", "")
-                val detectedLang = json.optString("language", null)
+                val detectedLang: String? = if (json.has("language") && !json.isNull("language")) {
+                    json.getString("language")
+                } else null
 
                 // 세그먼트 파싱
                 val segments = mutableListOf<Segment>()

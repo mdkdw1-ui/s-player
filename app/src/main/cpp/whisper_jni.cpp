@@ -92,13 +92,33 @@ struct CallbackHolder {
     jmethodID onProgress;
     jmethodID onComplete;
     jmethodID onLog;
-    jmethodID onLanguage;   // ← 추가!
+    jmethodID onLanguage;
     std::mutex mtx;
     int total_duration_cs = 0;
     int last_progress = 0;
 };
 
-// ---------------- 세그먼트 콜백 ----------------
+// ---------------- progress_callback (사용 전에 정의!) ----------------
+static void progress_callback(whisper_context * /*ctx*/,
+                              whisper_state * /*state*/,
+                              int progress,
+                              void *user_data) {
+    auto *holder = reinterpret_cast<CallbackHolder *>(user_data);
+    if (!holder || !holder->onProgress) return;
+
+    JNIEnv *env = nullptr;
+    bool attached = false;
+    if (g_vm->GetEnv((void **)&env, JNI_VERSION_1_6) != JNI_OK) {
+        if (g_vm->AttachCurrentThread(&env, nullptr) != JNI_OK) return;
+        attached = true;
+    }
+
+    env->CallVoidMethod(holder->callback, holder->onProgress, (jint)progress);
+
+    if (attached) g_vm->DetachCurrentThread();
+}
+
+// ---------------- new_segment_callback ----------------
 static void new_segment_callback(whisper_context *ctx, whisper_state *,
                                  int n_new, void *user_data) {
     auto *holder = reinterpret_cast<CallbackHolder *>(user_data);
@@ -220,8 +240,6 @@ Java_com_mdkdw1_splayer_WhisperBridge_nativeTranscribe(
     params.new_segment_callback_user_data = &holder;
     params.progress_callback = progress_callback;
     params.progress_callback_user_data = &holder;
-    params.progress_callback = progress_callback;
-    params.progress_callback_user_data = &holder;
 
     kotlin_log(env, callback, onLog, "JNI: whisper_full 시작");
     int ret = whisper_full(ctx, params, wav.samples.data(), (int) wav.samples.size());
@@ -232,7 +250,6 @@ Java_com_mdkdw1_splayer_WhisperBridge_nativeTranscribe(
         snprintf(buf, sizeof(buf), "JNI: whisper_full 종료 ret=%d, 감지언어=%s", ret, langStr2);
         kotlin_log(env, callback, onLog, buf);
 
-        // 언어 콜백
         if (holder.onLanguage && langId >= 0) {
             jstring jlang = env->NewStringUTF(langStr2);
             env->CallVoidMethod(holder.callback, holder.onLanguage, jlang);
