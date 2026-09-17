@@ -182,6 +182,7 @@ Java_com_mdkdw1_splayer_WhisperBridge_nativeTranscribe(
     holder.onProgress = env->GetMethodID(cls, "onProgress", "(I)V");
     holder.onComplete = env->GetMethodID(cls, "onComplete", "()V");
     holder.onLog = onLog;
+    holder.onLanguage = env->GetMethodID(cls, "onLanguage", "(Ljava/lang/String;)V");
     holder.total_duration_cs = total_cs;
 
     if (!holder.onSegment || !holder.onProgress || !holder.onComplete) {
@@ -206,9 +207,18 @@ Java_com_mdkdw1_splayer_WhisperBridge_nativeTranscribe(
     kotlin_log(env, callback, onLog, "JNI: whisper_full 시작");
     int ret = whisper_full(ctx, params, wav.samples.data(), (int) wav.samples.size());
     {
-        char buf[128];
-        snprintf(buf, sizeof(buf), "JNI: whisper_full 종료 ret=%d", ret);
+        int langId = whisper_full_lang_id(ctx);
+        const char *langStr2 = (langId >= 0) ? whisper_lang_str(langId) : "?";
+        char buf[256];
+        snprintf(buf, sizeof(buf), "JNI: whisper_full 종료 ret=%d, 감지언어=%s", ret, langStr2);
         kotlin_log(env, callback, onLog, buf);
+
+        // Kotlin 에 언어 콜백
+        if (holder.onLanguage && langId >= 0) {
+            jstring jlang = env->NewStringUTF(langStr2);
+            env->CallVoidMethod(holder.callback, holder.onLanguage, jlang);
+            env->DeleteLocalRef(jlang);
+        }
     }
 
     env->CallVoidMethod(holder.callback, holder.onComplete);

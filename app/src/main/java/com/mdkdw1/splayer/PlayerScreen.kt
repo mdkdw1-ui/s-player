@@ -51,6 +51,8 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel()) {
     val logs by LogBus.lines.collectAsState()
     val whisperModel by vm.whisperModel.collectAsState()
     val sttState by vm.sttState.collectAsState()
+    val sourceLang by vm.sourceLang.collectAsState()
+    val detectedLang by vm.detectedLang.collectAsState()
 
     var webViewRef by remember { mutableStateOf<WebView?>(null) }
     var langMenuOpen by remember { mutableStateOf(false) }
@@ -59,6 +61,7 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel()) {
     var sttPanelOpen by remember { mutableStateOf(false) }
     var moreMenuOpen by remember { mutableStateOf(false) }
     var cachePanelOpen by remember { mutableStateOf(false) }
+    var sourceLangMenuOpen by remember { mutableStateOf(false) }
 
     val lowVolume = captureOn && rawLevel in 0.0001f..0.005f
     val silence = captureOn && rawLevel <= 0.0001f
@@ -282,6 +285,32 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel()) {
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text("STT 결과 (${sttState.segments.size})", color = Color.White, fontSize = 13.sp)
+                        Spacer(Modifier.width(8.dp))
+                        // 소스 언어 선택
+                        Box {
+                            TextButton(onClick = { sourceLangMenuOpen = true }) {
+                                val label = if (sourceLang == SttSourceLang.AUTO && detectedLang != null) {
+                                    "자동($detectedLang)"
+                                } else {
+                                    sourceLang.displayName
+                                }
+                                Text(label, fontSize = 11.sp, color = Color(0xFFB0D0FF))
+                            }
+                            DropdownMenu(
+                                expanded = sourceLangMenuOpen,
+                                onDismissRequest = { sourceLangMenuOpen = false }
+                            ) {
+                                SttSourceLang.values().forEach { lang ->
+                                    DropdownMenuItem(
+                                        text = { Text("${lang.displayName} (${lang.code})") },
+                                        onClick = {
+                                            vm.setSourceLang(lang)
+                                            sourceLangMenuOpen = false
+                                        }
+                                    )
+                                }
+                            }
+                        }
                         Spacer(Modifier.weight(1f))
                         if (!sttState.running && sttState.srtPath != null) {
                             TextButton(onClick = {

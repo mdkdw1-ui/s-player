@@ -91,6 +91,22 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     private val _sttState = MutableStateFlow(SttState())
     val sttState: StateFlow<SttState> = _sttState
 
+    // 소스 언어 (STT 입력 언어)
+    private val _sourceLang = MutableStateFlow(SttSourceLang.AUTO)
+    val sourceLang: StateFlow<SttSourceLang> = _sourceLang
+
+    // 감지된 언어 (자동 감지 시 표시용)
+    private val _detectedLang = MutableStateFlow<String?>(null)
+    val detectedLang: StateFlow<String?> = _detectedLang
+
+    // 소스 언어 (STT 입력 언어)
+    private val _sourceLang = MutableStateFlow(SttSourceLang.AUTO)
+    val sourceLang: StateFlow<SttSourceLang> = _sourceLang
+
+    // 감지된 언어 (자동 감지 시 표시용)
+    private val _detectedLang = MutableStateFlow<String?>(null)
+    val detectedLang: StateFlow<String?> = _detectedLang
+
     private val _lastStreamInfo = MutableStateFlow<StreamResult?>(null)
     val lastStreamInfo: StateFlow<StreamResult?> = _lastStreamInfo
 
@@ -179,13 +195,14 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
                 context = getApplication(),
                 sourceUri = uri,
                 model = model,
-                sourceLang = "auto",
+                sourceLang = _sourceLang.value.code,
                 targetLang = "ko",
                 onProgress = { p ->
                     _sttState.value = _sttState.value.copy(stage = p.stage, percent = p.percent, message = p.message)
                     LogBus.log("STT", "${p.stage} ${p.percent}% ${p.message}")
                 },
-                onSegment = { seg -> addSegment(seg) }
+                onSegment = { seg -> addSegment(seg) },
+                onLanguageDetected = { lang -> _detectedLang.value = lang }
             )
             flushSegments()
             _sttState.value = _sttState.value.copy(
@@ -209,7 +226,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
                 context = getApplication(),
                 url = url,
                 model = model,
-                sourceLang = "auto",
+                sourceLang = _sourceLang.value.code,
                 targetLang = "ko",
                 onProgress = { p ->
                     _sttState.value = _sttState.value.copy(stage = p.stage, percent = p.percent, message = p.message)
@@ -219,7 +236,8 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
                 onStreamInfo = { info ->
                     LogBus.log("URL", "제목: ${info.title}, ${info.durationSec}초")
                     _lastStreamInfo.value = info
-                }
+                },
+                onLanguageDetected = { lang -> _detectedLang.value = lang }
             )
             flushSegments()
             _sttState.value = _sttState.value.copy(
@@ -235,6 +253,18 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         val playUrl = info.videoUrl ?: return
         _videoUrl.value = playUrl
         _mode.value = PlayerMode.LOCAL
+    }
+
+    fun setSourceLang(lang: SttSourceLang) {
+        _sourceLang.value = lang
+        _detectedLang.value = null
+        LogBus.log("VM", "sourceLang=${lang.code}")
+    }
+
+    fun setSourceLang(lang: SttSourceLang) {
+        _sourceLang.value = lang
+        _detectedLang.value = null
+        LogBus.log("VM", "sourceLang=${lang.code}")
     }
 
     fun clearStt() {

@@ -17,6 +17,7 @@ object WhisperBridge {
         fun onProgress(percent: Int)
         fun onComplete()
         fun onLog(msg: String)
+        fun onLanguage(langCode: String) = Unit   // 기본 no-op
     }
 
     external fun nativeSystemInfo(): String
