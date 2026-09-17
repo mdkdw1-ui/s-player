@@ -191,15 +191,21 @@ object SubtitlePipeline {
         } catch (e: Exception) { LogBus.log(TAG, "STT 예외: ${e.message}"); false }
 
         // Whisper 완료 후 번역 시작
-        val actualSource = detectedLang ?: sourceLang
-        LogBus.log(TAG, "번역 시작 (source=$actualSource, target=$targetLang)")
+        // 수동 선택이 있으면 그걸 최우선, 없으면 감지 언어, 마지막으로 sourceLang
+        val actualSource = if (sourceLang != "auto") sourceLang
+                          else detectedLang ?: "en"
+        LogBus.log(TAG, "번역 시작 (source=$actualSource, target=$targetLang, detected=$detectedLang)")
         translatorThread = Thread {
             while (true) {
                 val seg = try { queue.take() } catch (e: Exception) { break }
                 if (seg.original == "__DONE__") break
                 val translated = try {
                     if (targetLang == actualSource) seg.original
-                    else kotlinx.coroutines.runBlocking { translator.translate(seg.original, targetLang, actualSource) }
+                    else {
+                        val t = kotlinx.coroutines.runBlocking { translator.translate(seg.original, targetLang, actualSource) }
+                        // 번역 결과가 원문과 같으면 빈 문자열 (원문 표시만)
+                        if (t == seg.original) "" else t
+                    }
                 } catch (e: Exception) { "" }
                 val finalSeg = seg.copy(translated = translated)
                 synchronized(lock) { collected.add(finalSeg) }
