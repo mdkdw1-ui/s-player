@@ -270,6 +270,27 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel()) {
             }
         }
 
+        // 웹에서 영상 발견됐지만 재생 안 됨 안내
+        if (mode == PlayerMode.WEBVIEW && videoFound && !sttState.running) {
+            Card(
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.secondaryContainer
+                ),
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        "영상을 재생하면 자막이 시작됩니다",
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+            }
+        }
+
         // STT 진행률 (실행 중)
         AnimatedVisibility(visible = sttState.running) {
             Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp)) {
