@@ -256,8 +256,12 @@ object SubtitlePipeline {
             onProgress(Progress("translate", (i+1) * 100 / total.coerceAtLeast(1), "번역 ${i+1}/$total"))
         }
 
-        val finalSegments = synchronized(lock) { collected.toList() }
-        LogBus.log(TAG, "완료: ${finalSegments.size} 세그먼트")
+        val rawSegments = synchronized(lock) { collected.toList() }
+        LogBus.log(TAG, "원본: ${rawSegments.size} 세그먼트")
+
+        // 세그먼트 병합 (가독성)
+        val finalSegments = mergeSegments(rawSegments)
+        LogBus.log(TAG, "병합 후: ${finalSegments.size} 세그먼트")
 
         val srtFile = File(AudioPaths.subtitleDir(context), "test_${targetLang}.srt")
         writeSrt(srtFile, finalSegments)
@@ -269,6 +273,47 @@ object SubtitlePipeline {
 
         onProgress(Progress("done", 100, "완료: ${finalSegments.size} 세그먼트"))
         return srtFile
+    }
+
+    // ================== 세그먼트 병합 ==================
+    /**
+     * 자막 가독성을 위해 세그먼트 병합.
+     * - 최소 표시 시간 1.5초
+     * - 최대 표시 시간 6초
+     * - 최대 글자 수 80자 (한국어 기준)
+     */
+    private fun mergeSegments(segments: List<Segment>): List<Segment> {
+        if (segments.isEmpty()) return segments
+
+        val out = mutableListOf<Segment>()
+        var cur = segments[0]
+
+        for (i in 1 until segments.size) {
+            val next = segments[i]
+            val durationMs = cur.endMs - cur.startMs
+            val gap = next.startMs - cur.endMs
+
+            val combinedText = (cur.original + " " + next.original).trim()
+            val combinedTrans = (cur.translated + " " + next.translated).trim()
+
+            val shouldMerge = durationMs < 1500 &&
+                gap < 500 &&
+                combinedText.length < 120 &&
+                combinedTrans.length < 80
+
+            if (shouldMerge) {
+                cur = cur.copy(
+                    endMs = next.endMs,
+                    original = combinedText,
+                    translated = combinedTrans
+                )
+            } else {
+                out.add(cur)
+                cur = next
+            }
+        }
+        out.add(cur)
+        return out
     }
 
     // ================== 유틸 ==================
