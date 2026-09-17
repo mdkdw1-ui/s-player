@@ -91,128 +91,101 @@ fun WebViewBox(
         AndroidView(
             modifier = Modifier.fillMaxSize(),
             factory = { ctx ->
-                WebView(ctx).apply {
-                    // ===== 성능 최적화 =====
-                    settings.apply {
-                        javaScriptEnabled = true
-                        domStorageEnabled = true
-                        databaseEnabled = true
-                        mediaPlaybackRequiresUserGesture = false
+                val wv = WebView(ctx)
 
-                        // 캐시 적극 활용
-                        cacheMode = WebSettings.LOAD_DEFAULT
-
-                        // 뷰포트/스케일
-                        loadWithOverviewMode = true
-                        useWideViewPort = true
-                        setSupportZoom(true)
-                        builtInZoomControls = false
-                        displayZoomControls = false
-
-                        // 렌더링 최적화
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                            setRendererPriorityPolicy(
-                                WebView.RENDERER_PRIORITY_IMPORTANT, false
-                            )
-                        }
-
-                        // 이미지
-                        loadsImagesAutomatically = true
-                        blockNetworkImage = false
-
-                        // 폰트 부스트 방지
-                        textZoom = 100
-
-                        // JS 창
-                        javaScriptCanOpenWindowsAutomatically = true
-                        setSupportMultipleWindows(false)
-
-                        // 오프라인 캐시 (deprecated이지만 여전히 유효)
-                        @Suppress("DEPRECATION")
-                        allowFileAccess = false
-
-                        // 쿠키
-                        @Suppress("DEPRECATION")
-                        acceptThirdPartyCookies(this@apply)
-
-                        // 데스크톱 UA 쓰지 않고 **모바일 Chrome UA** 로 통일
-                        // (구글 로그인, YouTube 최적화에 유리)
-                        userAgentString =
-                            "Mozilla/5.0 (Linux; Android 13; SM-S908B) " +
-                            "AppleWebKit/537.36 (KHTML, like Gecko) " +
-                            "Chrome/120.0.0.0 Mobile Safari/537.36"
+                // 쿠키 매니저 설정
+                CookieManager.getInstance().apply {
+                    setAcceptCookie(true)
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                        setAcceptThirdPartyCookies(wv, true)
                     }
-
-                    // 쿠키 매니저
-                    CookieManager.getInstance().apply {
-                        setAcceptCookie(true)
-                        setAcceptThirdPartyCookies(this@apply, true)
-                    }
-
-                    // 하드웨어 가속 (View 레벨)
-                    setLayerType(android.view.View.LAYER_TYPE_HARDWARE, null)
-
-                    webChromeClient = object : WebChromeClient() {
-                        override fun onProgressChanged(view: WebView?, newProgress: Int) {
-                            progress = newProgress
-                        }
-
-                        override fun onConsoleMessage(
-                            consoleMessage: android.webkit.ConsoleMessage?
-                        ): Boolean {
-                            val msg = consoleMessage?.message() ?: return false
-                            if (msg.contains("[SPlayer]")) onLog("console: $msg")
-                            return true
-                        }
-                    }
-
-                    webViewClient = object : WebViewClient() {
-                        override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
-                            super.onPageStarted(view, url, favicon)
-                            url?.let { onUrlChanged(it) }
-                            onLog("page started: $url")
-                            pageGeneration++
-                        }
-
-                        override fun onPageFinished(view: WebView?, url: String?) {
-                            super.onPageFinished(view, url)
-                            url?.let { onUrlChanged(it) }
-                            onLog("page finished: $url")
-                            view?.injectAudioCaptureScript()
-                        }
-
-                        override fun onReceivedError(
-                            view: WebView?, errorCode: Int, description: String?, failingUrl: String?
-                        ) {
-                            super.onReceivedError(view, errorCode, description, failingUrl)
-                            onLog("web error $errorCode: $description @ $failingUrl")
-                        }
-
-                        override fun shouldOverrideUrlLoading(
-                            view: WebView?, request: WebResourceRequest?
-                        ): Boolean {
-                            val target = request?.url?.toString() ?: return false
-                            onUrlChanged(target)
-                            view?.loadUrl(target)
-                            return true
-                        }
-                    }
-
-                    addJavascriptInterface(
-                        JsBridge(onCaption, onAudioChunk, onVideoFound, onUrlChanged, onLog),
-                        "AndroidBridge"
-                    )
-
-                    // DNS 프리페치
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                        // 이미 on 이지만 명시
-                        settings.isSafeBrowsingEnabled = false  // 세이프 브라우징 off (속도 ↑, 보안 ↓)
-                    }
-
-                    loadUrl(loadUrl)
-                    webView = this
-                    onWebViewReady(this)
                 }
+
+                wv.settings.apply {
+                    javaScriptEnabled = true
+                    domStorageEnabled = true
+                    databaseEnabled = true
+                    mediaPlaybackRequiresUserGesture = false
+                    cacheMode = WebSettings.LOAD_DEFAULT
+                    loadWithOverviewMode = true
+                    useWideViewPort = true
+                    setSupportZoom(true)
+                    builtInZoomControls = false
+                    displayZoomControls = false
+                    loadsImagesAutomatically = true
+                    blockNetworkImage = false
+                    textZoom = 100
+                    javaScriptCanOpenWindowsAutomatically = true
+                    setSupportMultipleWindows(false)
+
+                    // 모바일 Chrome UA
+                    userAgentString =
+                        "Mozilla/5.0 (Linux; Android 13; SM-S908B) " +
+                        "AppleWebKit/537.36 (KHTML, like Gecko) " +
+                        "Chrome/120.0.0.0 Mobile Safari/537.36"
+                }
+
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    wv.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, false)
+                }
+
+                wv.setLayerType(android.view.View.LAYER_TYPE_HARDWARE, null)
+
+                wv.webChromeClient = object : WebChromeClient() {
+                    override fun onProgressChanged(view: WebView?, newProgress: Int) {
+                        progress = newProgress
+                    }
+
+                    override fun onConsoleMessage(
+                        consoleMessage: android.webkit.ConsoleMessage?
+                    ): Boolean {
+                        val msg = consoleMessage?.message() ?: return false
+                        if (msg.contains("[SPlayer]")) onLog("console: $msg")
+                        return true
+                    }
+                }
+
+                wv.webViewClient = object : WebViewClient() {
+                    override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
+                        super.onPageStarted(view, url, favicon)
+                        url?.let { onUrlChanged(it) }
+                        onLog("page started: $url")
+                        pageGeneration++
+                    }
+
+                    override fun onPageFinished(view: WebView?, url: String?) {
+                        super.onPageFinished(view, url)
+                        url?.let { onUrlChanged(it) }
+                        onLog("page finished: $url")
+                        view?.injectAudioCaptureScript()
+                    }
+
+                    override fun onReceivedError(
+                        view: WebView?, errorCode: Int, description: String?, failingUrl: String?
+                    ) {
+                        super.onReceivedError(view, errorCode, description, failingUrl)
+                        onLog("web error $errorCode: $description @ $failingUrl")
+                    }
+
+                    override fun shouldOverrideUrlLoading(
+                        view: WebView?, request: WebResourceRequest?
+                    ): Boolean {
+                        val target = request?.url?.toString() ?: return false
+                        onUrlChanged(target)
+                        view?.loadUrl(target)
+                        return true
+                    }
+                }
+
+                wv.addJavascriptInterface(
+                    JsBridge(onCaption, onAudioChunk, onVideoFound, onUrlChanged, onLog),
+                    "AndroidBridge"
+                )
+
+                wv.loadUrl(loadUrl)
+                webView = wv
+                onWebViewReady(wv)
+                wv
             }
         )
 

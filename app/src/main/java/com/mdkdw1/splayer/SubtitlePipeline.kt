@@ -155,7 +155,7 @@ object SubtitlePipeline {
         val lock = Object()
 
         // Whisper 가 감지한 원본 언어 (콜백으로 채워짐)
-        @Volatile var detectedLang: String? = null
+        var detectedLang: String? = null
 
         // 번역 스레드는 Whisper 완료 후 시작 (감지 언어 확정 후)
         // 지금은 세그먼트만 모아둠

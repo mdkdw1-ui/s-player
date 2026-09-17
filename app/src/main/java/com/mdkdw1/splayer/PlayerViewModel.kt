@@ -46,7 +46,7 @@ data class WhisperModelStatus(
 
 class PlayerViewModel(app: Application) : AndroidViewModel(app) {
 
-    // ----- 모드/재생 -----
+    // ===== 모드/재생 =====
     private val _mode = MutableStateFlow(PlayerMode.WEBVIEW)
     val mode: StateFlow<PlayerMode> = _mode
 
@@ -91,28 +91,20 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     private val _sttState = MutableStateFlow(SttState())
     val sttState: StateFlow<SttState> = _sttState
 
-    // 소스 언어 (STT 입력 언어)
-    private val _sourceLang = MutableStateFlow(SttSourceLang.AUTO)
-    val sourceLang: StateFlow<SttSourceLang> = _sourceLang
-
-    // 감지된 언어 (자동 감지 시 표시용)
-    private val _detectedLang = MutableStateFlow<String?>(null)
-    val detectedLang: StateFlow<String?> = _detectedLang
-
-    // 소스 언어 (STT 입력 언어)
-    private val _sourceLang = MutableStateFlow(SttSourceLang.AUTO)
-    val sourceLang: StateFlow<SttSourceLang> = _sourceLang
-
-    // 감지된 언어 (자동 감지 시 표시용)
-    private val _detectedLang = MutableStateFlow<String?>(null)
-    val detectedLang: StateFlow<String?> = _detectedLang
-
     private val _lastStreamInfo = MutableStateFlow<StreamResult?>(null)
     val lastStreamInfo: StateFlow<StreamResult?> = _lastStreamInfo
 
+    // 소스 언어 (STT 입력 언어)
+    private val _sourceLang = MutableStateFlow(SttSourceLang.AUTO)
+    val sourceLang: StateFlow<SttSourceLang> = _sourceLang
+
+    // 감지된 언어 (자동 감지 시 표시용)
+    private val _detectedLang = MutableStateFlow<String?>(null)
+    val detectedLang: StateFlow<String?> = _detectedLang
+
     private var pipeline: TranslationPipeline? = null
 
-    // 세그먼트를 임시로 모으는 버퍼 (매번 StateFlow 갱신 방지)
+    // 세그먼트 버퍼
     private val segmentBuffer = mutableListOf<SubtitlePipeline.Segment>()
     private var lastEmitAt = 0L
     private val emitThrottleMs = 300L
@@ -157,7 +149,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    // ============ STT (로컬/URL) ============
+    // ============ STT ============
     private fun resetSegmentBuffer() {
         synchronized(segmentBuffer) {
             segmentBuffer.clear()
@@ -180,6 +172,12 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         synchronized(segmentBuffer) {
             _sttState.value = _sttState.value.copy(segments = segmentBuffer.toList())
         }
+    }
+
+    fun setSourceLang(lang: SttSourceLang) {
+        _sourceLang.value = lang
+        _detectedLang.value = null
+        LogBus.log("VM", "sourceLang=${lang.code}")
     }
 
     fun runLocalStt(uri: Uri) {
@@ -255,21 +253,10 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         _mode.value = PlayerMode.LOCAL
     }
 
-    fun setSourceLang(lang: SttSourceLang) {
-        _sourceLang.value = lang
-        _detectedLang.value = null
-        LogBus.log("VM", "sourceLang=${lang.code}")
-    }
-
-    fun setSourceLang(lang: SttSourceLang) {
-        _sourceLang.value = lang
-        _detectedLang.value = null
-        LogBus.log("VM", "sourceLang=${lang.code}")
-    }
-
     fun clearStt() {
         resetSegmentBuffer()
         _sttState.value = SttState()
+        _detectedLang.value = null
     }
 
     // ============ 캡처/웹 ============
