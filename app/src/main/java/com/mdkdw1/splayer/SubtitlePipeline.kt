@@ -136,8 +136,15 @@ object SubtitlePipeline {
                 onProgress(Progress("stt", p, "Groq $p%", "groq"))
             }
             if (r == null) { onProgress(Progress("error", 0, "Groq 실패")); return null }
-            detectedLang = r.language
-            detectedLang?.let { onLanguageDetected(it) }
+            // Groq 감지 언어를 신뢰하지 않음 (버그 있음)
+            // 사용자가 명시한 sourceLang 을 그대로 사용
+            if (sourceLang != "auto") {
+                detectedLang = sourceLang
+                LogBus.log(TAG, "Groq 감지=${r.language}, 사용자 지정=$sourceLang → $sourceLang 사용")
+            } else {
+                detectedLang = r.language
+                detectedLang?.let { onLanguageDetected(it) }
+            }
             r.segments.forEach { s -> rawTexts.add(Triple(s.startMs, s.endMs, s.text)) }
         } else {
             if (!WhisperModelDownloader.isInstalled(context, model)) {
@@ -190,14 +197,25 @@ object SubtitlePipeline {
             "spanish", "es" -> "es"
             "french", "fr" -> "fr"
             "german", "de" -> "de"
+            "italian", "it" -> "it"
+            "portuguese", "pt" -> "pt"
+            "russian", "ru" -> "ru"
+            // 신뢰할 수 없는 감지 (Groq 버그) → "auto" 취급
+            "latin", "la", "unknown", "und", "" -> "auto"
             else -> lang.lowercase().take(2)
         }
 
+        // 감지 언어가 신뢰 불가면 사용자 선택 우선
+        val userLang = if (sourceLang != "auto") normalizeLang(sourceLang) else "auto"
+        val groqLang = detectedLang?.let { normalizeLang(it) } ?: "auto"
+
         val actualSource = when {
-            sourceLang != "auto" -> normalizeLang(sourceLang)
-            detectedLang != null -> normalizeLang(detectedLang!!)
-            else -> "ja"
+            userLang != "auto" -> userLang                       // 사용자 선택 최우선
+            groqLang != "auto" -> groqLang                       // Groq 감지 신뢰
+            else -> "ja"                                          // 기본
         }
+
+        LogBus.log(TAG, "언어 결정: user=$userLang, groq=$groqLang, final=$actualSource")
 
         val collected = mutableListOf<Segment>()
 
