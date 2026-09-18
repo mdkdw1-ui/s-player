@@ -116,7 +116,7 @@ object StreamDownloader {
 
             attempt++
             if (attempt < MAX_RETRY) {
-                delay(1000L * attempt)
+                delay(2000L * attempt)
             }
         }
         LogBus.log(TAG, "최대 재시도 초과")
