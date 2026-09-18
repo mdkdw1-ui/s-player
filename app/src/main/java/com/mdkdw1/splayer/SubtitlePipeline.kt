@@ -201,36 +201,55 @@ object SubtitlePipeline {
         if (targetLang == actualSource) {
             rawTexts.forEach { (s, e, t) -> collected.add(Segment(s, e, t, t)) }
         } else if (TexTraTranslator.isConfigured()) {
-            // ===== TexTra: 개별 번역 =====
-            LogBus.log(TAG, "★★★ TexTra 개별 번역 모드 ★★★")
+            // ===== TexTra: 병렬 번역 =====
+            LogBus.log(TAG, "★★★ TexTra 병렬 번역 모드 (동시 3개) ★★★")
             LogBus.log(TAG, "   총 ${rawTexts.size}개, src=$actualSource → tgt=$targetLang")
-            onProgress(Progress("translate", 0, "TexTra 번역 ($actualSource → $targetLang)", "textra"))
+            onProgress(Progress("translate", 0, "TexTra 병렬 번역 시작...", "textra"))
 
-            var textraSuccess = 0
-            rawTexts.forEachIndexed { i, (s, e, t) ->
-                val tr = try {
-                    TexTraTranslator.translate(t, targetLang, actualSource) ?: ""
-                } catch (ex: Exception) {
-                    LogBus.log(TAG, "TexTra [$i] 예외: ${ex.message}")
-                    ""
-                }
-                if (tr.isNotBlank()) textraSuccess++
-                collected.add(Segment(s, e, t, tr))
-                onProgress(
-                    Progress(
-                        "translate",
-                        (i + 1) * 100 / rawTexts.size,
-                        "TexTra ${i + 1}/${rawTexts.size} (성공 $textraSuccess)",
-                        "textra"
-                    )
-                )
-                LogBus.log(TAG, "  [$i/${rawTexts.size}] ${t.take(20)} → ${tr.take(20)}")
+            val total = rawTexts.size
+            val results = arrayOfNulls<String>(total)
+            val semaphore = kotlinx.coroutines.sync.Semaphore(3)  // 동시 3개
+            var doneCount = java.util.concurrent.atomic.AtomicInteger(0)
+            var successCount = java.util.concurrent.atomic.AtomicInteger(0)
 
-                if (i < rawTexts.size - 1) {
-                    try { delay(500) } catch (_: Exception) {}
+            val startTime = System.currentTimeMillis()
+
+            kotlinx.coroutines.coroutineScope {
+                rawTexts.forEachIndexed { i, (_, _, t) ->
+                    kotlinx.coroutines.launch(Dispatchers.IO) {
+                        semaphore.withPermit {
+                            val tr = try {
+                                TexTraTranslator.translate(t, targetLang, actualSource) ?: ""
+                            } catch (ex: Exception) {
+                                LogBus.log(TAG, "TexTra [$i] 예외: ${ex.message}")
+                                ""
+                            }
+                            results[i] = tr
+                            if (tr.isNotBlank()) successCount.incrementAndGet()
+
+                            val done = doneCount.incrementAndGet()
+                            val elapsed = System.currentTimeMillis() - startTime
+                            val eta = if (done > 0) (elapsed * (total - done) / done) / 1000 else 0
+                            onProgress(
+                                Progress(
+                                    "translate",
+                                    done * 100 / total,
+                                    "TexTra $done/$total (성공 ${successCount.get()}, 남은 ${eta}초)",
+                                    "textra"
+                                )
+                            )
+                            LogBus.log(TAG, "  [$done/$total] ${t.take(20)} → ${tr.take(20)}")
+                        }
+                    }
                 }
             }
-            LogBus.log(TAG, "★★★ TexTra 완료: ${textraSuccess}/${rawTexts.size} 성공 ★★★")
+
+            // 결과 순서대로 수집
+            rawTexts.forEachIndexed { i, (s, e, t) ->
+                collected.add(Segment(s, e, t, results[i] ?: ""))
+            }
+            val elapsedTotal = (System.currentTimeMillis() - startTime) / 1000.0
+            LogBus.log(TAG, "★★★ TexTra 완료: ${successCount.get()}/${total} 성공 (%.1f초) ★★★".format(elapsedTotal))
         } else {
             // ===== Google: 통번역 =====
             val combinedText = rawTexts.joinToString(SEP) { it.third }
