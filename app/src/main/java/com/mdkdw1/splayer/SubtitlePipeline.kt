@@ -189,6 +189,14 @@ object SubtitlePipeline {
         } else {
             val combinedText = rawTexts.joinToString(SEP) { it.third }
             LogBus.log(TAG, "통번역 시작: ${rawTexts.size}개, ${combinedText.length}자, src=$actualSource, tgt=$targetLang")
+
+            // === TexTra 키 진단 ===
+            LogBus.log(TAG, "TexTra isConfigured=${TexTraTranslator.isConfigured()}")
+            LogBus.log(TAG, "TEXTA_CLIENT_ID 길이=${BuildConfig.TEXTA_CLIENT_ID.length}")
+            LogBus.log(TAG, "TEXTA_CLIENT_SECRET 길이=${BuildConfig.TEXTA_CLIENT_SECRET.length}")
+            if (BuildConfig.TEXTA_CLIENT_ID.isNotEmpty()) {
+                LogBus.log(TAG, "TEXTA_CLIENT_ID 앞 4자=${BuildConfig.TEXTA_CLIENT_ID.take(4)}")
+            }
             onProgress(Progress("translate", 0, "통번역 중 ($actualSource → $targetLang)"))
 
             // suspend 함수 직접 호출 (runBlocking 금지)

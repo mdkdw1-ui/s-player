@@ -1,5 +1,8 @@
 package com.mdkdw1.splayer
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.net.Uri
 import android.webkit.WebView
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -493,6 +496,16 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel()) {
                 ) {
                     Text("로그 (${logs.size})", color = Color.White, fontSize = 12.sp)
                     Spacer(Modifier.weight(1f))
+                    TextButton(onClick = {
+                        try {
+                            val clipboard = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                            val text = logs.joinToString("\n")
+                            clipboard.setPrimaryClip(ClipData.newPlainText("S-Player Logs", text))
+                            android.widget.Toast.makeText(ctx, "로그 복사됨 (${logs.size}줄)", android.widget.Toast.LENGTH_SHORT).show()
+                        } catch (e: Exception) {
+                            LogBus.log("UI", "복사 실패: ${e.message}")
+                        }
+                    }) { Text("📋 복사", fontSize = 12.sp) }
                     TextButton(onClick = { LogBus.clear() }) { Text("지우기", fontSize = 12.sp) }
                     TextButton(onClick = { logPanelOpen = false }) { Text("닫기", fontSize = 12.sp) }
                 }
