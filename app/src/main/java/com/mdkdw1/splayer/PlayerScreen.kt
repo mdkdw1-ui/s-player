@@ -58,6 +58,12 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel()) {
     val detectedLang by vm.detectedLang.collectAsState()
     val modelFolderReady by vm.modelFolderReady.collectAsState()
     val modelFolderName by vm.modelFolderName.collectAsState()
+    val subtitleSize by vm.subtitleSize.collectAsState()
+    val subtitleEnabled by vm.subtitleEnabled.collectAsState()
+    val history by vm.history.collectAsState()
+    val bookmarks by vm.bookmarks.collectAsState()
+    val desktopUA by vm.desktopUA.collectAsState()
+    val webViewReloadKey by vm.webViewReloadKey.collectAsState()
 
     var webViewRef by remember { mutableStateOf<WebView?>(null) }
     var langMenuOpen by remember { mutableStateOf(false) }
@@ -67,6 +73,8 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel()) {
     var moreMenuOpen by remember { mutableStateOf(false) }
     var cachePanelOpen by remember { mutableStateOf(false) }
     var sourceLangMenuOpen by remember { mutableStateOf(false) }
+    var historyPanelOpen by remember { mutableStateOf(false) }
+    var bookmarkPanelOpen by remember { mutableStateOf(false) }
 
     val lowVolume = captureOn && rawLevel in 0.0001f..0.005f
     val silence = captureOn && rawLevel <= 0.0001f
@@ -164,6 +172,26 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel()) {
                         DropdownMenuItem(
                             text = { Text("캐시 목록") },
                             onClick = { cachePanelOpen = true; moreMenuOpen = false }
+                        )
+                        HorizontalDivider()
+                        DropdownMenuItem(
+                            text = { Text("📜 방문 기록") },
+                            onClick = { historyPanelOpen = true; moreMenuOpen = false }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("⭐ 북마크") },
+                            onClick = { bookmarkPanelOpen = true; moreMenuOpen = false }
+                        )
+                        DropdownMenuItem(
+                            text = { Text(if (desktopUA) "🌐 데스크톱 UA (ON)" else "📱 모바일 UA (OFF)") },
+                            onClick = { vm.toggleDesktopUA(); moreMenuOpen = false }
+                        )
+                        DropdownMenuItem(
+                            text = { Text(if (WebPrefs.isBookmarked(ctx, urlInput)) "⭐ 북마크 제거" else "☆ 북마크 추가") },
+                            onClick = {
+                                vm.toggleBookmark(urlInput, "")
+                                moreMenuOpen = false
+                            }
                         )
                         DropdownMenuItem(
                             text = { Text(if (captureOn) "캡처 중지" else "캡처 시작") },
@@ -340,6 +368,71 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel()) {
             Text("4x", style = MaterialTheme.typography.labelMedium)
         }
 
+        // ===== 자막 컨트롤 (플레이어 모드일 때만) =====
+        if (mode == PlayerMode.LOCAL) {
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 8.dp, vertical = 2.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceVariant
+                )
+            ) {
+                Column(modifier = Modifier.padding(6.dp)) {
+                    // 자막 크기 슬라이더
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("자막", fontSize = 11.sp, modifier = Modifier.width(28.dp))
+                        Slider(
+                            value = subtitleSize,
+                            onValueChange = { vm.setSubtitleSize(it) },
+                            valueRange = 0.03f..0.12f,
+                            modifier = Modifier.weight(1f).height(28.dp)
+                        )
+                        Text("크기", fontSize = 9.sp, modifier = Modifier.padding(start = 4.dp))
+                    }
+
+                    // 자막 ON/OFF + 배속 프리셋
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        // 자막 토글
+                        FilterChip(
+                            selected = subtitleEnabled,
+                            onClick = { vm.toggleSubtitle() },
+                            label = { Text(if (subtitleEnabled) "자막 ON" else "자막 OFF", fontSize = 10.sp) }
+                        )
+                        Spacer(Modifier.width(8.dp))
+
+                        // 배속 프리셋
+                        listOf(0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f).forEach { preset ->
+                            val selected = kotlin.math.abs(speed - preset) < 0.05f
+                            Box(
+                                modifier = Modifier
+                                    .padding(horizontal = 2.dp)
+                                    .background(
+                                        if (selected) MaterialTheme.colorScheme.primary
+                                        else MaterialTheme.colorScheme.surface,
+                                        RoundedCornerShape(4.dp)
+                                    )
+                                    .clickable { vm.setSpeed(preset) }
+                                    .padding(horizontal = 6.dp, vertical = 3.dp)
+                            ) {
+                                Text(
+                                    "${preset}x",
+                                    fontSize = 10.sp,
+                                    color = if (selected) Color.White else MaterialTheme.colorScheme.onSurface
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // 본문 영역
         Box(modifier = Modifier.weight(1f)) {
             if (sttPanelOpen) {
@@ -456,17 +549,24 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel()) {
                         url = videoUrl,
                         speed = speed,
                         subtitleFile = sttState.srtPath?.let { java.io.File(it) },
+                        subtitleSizeFraction = subtitleSize,
+                        subtitleEnabled = subtitleEnabled,
                         modifier = Modifier.fillMaxSize()
                     )
                     PlayerMode.WEBVIEW -> WebViewBox(
                         loadUrl = loadUrl,
                         speed = speed,
+                        desktopUA = desktopUA,
+                        reloadKey = webViewReloadKey,
                         onCaption = { text ->
                             vm.updateSubtitle(SubtitleCue(original = text, translated = "[번역] $text"))
                         },
                         onAudioChunk = { vm.onAudioChunk(it) },
                         onVideoFound = { vm.setVideoFound(it) },
-                        onUrlChanged = { vm.onWebViewUrlChanged(it) },
+                        onUrlChanged = {
+                            vm.onWebViewUrlChanged(it)
+                            vm.addHistory(it, "")
+                        },
                         onLog = { vm.onJsLog(it) },
                         onWebViewReady = { webViewRef = it },
                         modifier = Modifier.fillMaxSize()
@@ -561,6 +661,93 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel()) {
                 }
             }
         }
+    }
+
+    // 방문 기록 다이얼로그
+    if (historyPanelOpen) {
+        AlertDialog(
+            onDismissRequest = { historyPanelOpen = false },
+            title = { Text("📜 방문 기록 (${history.size})") },
+            text = {
+                if (history.isEmpty()) {
+                    Text("기록 없음")
+                } else {
+                    LazyColumn(modifier = Modifier.height(400.dp)) {
+                        items(history) { h ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        vm.onUrlInputChange(h.url)
+                                        vm.navigateToInput()
+                                        historyPanelOpen = false
+                                    }
+                                    .padding(vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(h.title, fontSize = 12.sp, maxLines = 1)
+                                    Text(h.url, fontSize = 9.sp, color = Color.Gray, maxLines = 1)
+                                }
+                            }
+                            HorizontalDivider()
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { vm.clearHistory(); historyPanelOpen = false }) {
+                    Text("전체 삭제")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { historyPanelOpen = false }) { Text("닫기") }
+            }
+        )
+    }
+
+    // 북마크 다이얼로그
+    if (bookmarkPanelOpen) {
+        AlertDialog(
+            onDismissRequest = { bookmarkPanelOpen = false },
+            title = { Text("⭐ 북마크 (${bookmarks.size})") },
+            text = {
+                if (bookmarks.isEmpty()) {
+                    Text("북마크 없음")
+                } else {
+                    LazyColumn(modifier = Modifier.height(400.dp)) {
+                        items(bookmarks) { b ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .clickable {
+                                            vm.onUrlInputChange(b.url)
+                                            vm.navigateToInput()
+                                            bookmarkPanelOpen = false
+                                        }
+                                ) {
+                                    Text(b.title, fontSize = 12.sp, maxLines = 1)
+                                    Text(b.url, fontSize = 9.sp, color = Color.Gray, maxLines = 1)
+                                }
+                                TextButton(onClick = { vm.removeBookmark(b.url) }) {
+                                    Text("삭제", fontSize = 10.sp)
+                                }
+                            }
+                            HorizontalDivider()
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { bookmarkPanelOpen = false }) { Text("닫기") }
+            }
+        )
     }
 
     // 캐시 목록 다이얼로그

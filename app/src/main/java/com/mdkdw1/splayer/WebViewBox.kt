@@ -54,6 +54,8 @@ class JsBridge(
 fun WebViewBox(
     loadUrl: String,
     speed: Float,
+    desktopUA: Boolean = false,
+    reloadKey: Int = 0,
     onCaption: (String) -> Unit,
     onAudioChunk: (FloatArray) -> Unit,
     onVideoFound: (Boolean) -> Unit,
@@ -72,6 +74,28 @@ fun WebViewBox(
 
     LaunchedEffect(speed, webView) {
         webView?.applyPlaybackSpeed(speed)
+    }
+
+    // UA 모드 변경 시 WebView 재생성 (reload)
+    LaunchedEffect(desktopUA, webView) {
+        val wv = webView ?: return@LaunchedEffect
+        val ua = if (desktopUA) {
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        } else {
+            "Mozilla/5.0 (Linux; Android 13; SM-S908B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
+        }
+        if (wv.settings.userAgentString != ua) {
+            wv.settings.userAgentString = ua
+            onLog("UA 변경: ${if (desktopUA) "데스크톱" else "모바일"}")
+            wv.reload()
+        }
+    }
+
+    // 외부 reload 트리거
+    LaunchedEffect(reloadKey) {
+        if (reloadKey > 0) {
+            webView?.reload()
+        }
     }
 
     LaunchedEffect(pageGeneration, webView) {

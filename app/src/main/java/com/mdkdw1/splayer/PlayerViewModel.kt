@@ -95,6 +95,26 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     private val _lastStreamInfo = MutableStateFlow<StreamResult?>(null)
     val lastStreamInfo: StateFlow<StreamResult?> = _lastStreamInfo
 
+    // ===== 자막 설정 =====
+    private val _subtitleSize = MutableStateFlow(0.06f)   // 0.03 ~ 0.12
+    val subtitleSize: StateFlow<Float> = _subtitleSize
+
+    private val _subtitleEnabled = MutableStateFlow(true)
+    val subtitleEnabled: StateFlow<Boolean> = _subtitleEnabled
+
+    // ===== 웹 편의성 상태 =====
+    private val _history = MutableStateFlow<List<WebPrefs.HistoryItem>>(emptyList())
+    val history: StateFlow<List<WebPrefs.HistoryItem>> = _history
+
+    private val _bookmarks = MutableStateFlow<List<WebPrefs.BookmarkItem>>(emptyList())
+    val bookmarks: StateFlow<List<WebPrefs.BookmarkItem>> = _bookmarks
+
+    private val _desktopUA = MutableStateFlow(false)
+    val desktopUA: StateFlow<Boolean> = _desktopUA
+
+    private val _webViewReloadKey = MutableStateFlow(0)
+    val webViewReloadKey: StateFlow<Int> = _webViewReloadKey
+
     // 소스 언어 (STT 입력 언어)
     private val _sourceLang = MutableStateFlow(SttSourceLang.AUTO)
     val sourceLang: StateFlow<SttSourceLang> = _sourceLang
@@ -121,6 +141,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         refreshModelStatus()
         refreshWhisperStatus()
         refreshModelFolder()
+        refreshWebData()
         LogBus.log("VM", "init")
 
         AudioCaptureService.onSamples = { samples, rate ->
@@ -202,6 +223,62 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     fun clearModelFolder() {
         WhisperModelStorage.clearTreeUri(getApplication())
         refreshModelFolder()
+    }
+
+    // ===== 웹 편의성 =====
+    fun refreshWebData() {
+        _history.value = WebPrefs.getHistory(getApplication())
+        _bookmarks.value = WebPrefs.getBookmarks(getApplication())
+        _desktopUA.value = WebPrefs.isDesktopUA(getApplication())
+    }
+
+    fun addHistory(url: String, title: String = "") {
+        WebPrefs.addHistory(getApplication(), url, title)
+        _history.value = WebPrefs.getHistory(getApplication())
+    }
+
+    fun clearHistory() {
+        WebPrefs.clearHistory(getApplication())
+        _history.value = emptyList()
+    }
+
+    fun addBookmark(url: String, title: String = "") {
+        WebPrefs.addBookmark(getApplication(), url, title)
+        _bookmarks.value = WebPrefs.getBookmarks(getApplication())
+    }
+
+    fun removeBookmark(url: String) {
+        WebPrefs.removeBookmark(getApplication(), url)
+        _bookmarks.value = WebPrefs.getBookmarks(getApplication())
+    }
+
+    fun toggleBookmark(url: String, title: String = "") {
+        if (WebPrefs.isBookmarked(getApplication(), url)) {
+            removeBookmark(url)
+        } else {
+            addBookmark(url, title)
+        }
+    }
+
+    fun toggleDesktopUA() {
+        val newVal = !_desktopUA.value
+        WebPrefs.setDesktopUA(getApplication(), newVal)
+        _desktopUA.value = newVal
+        // WebView 재로드 트리거
+        _webViewReloadKey.value = _webViewReloadKey.value + 1
+        LogBus.log("VM", "desktopUA=$newVal")
+    }
+
+    fun reloadWebView() {
+        _webViewReloadKey.value = _webViewReloadKey.value + 1
+    }
+
+    fun setSubtitleSize(size: Float) {
+        _subtitleSize.value = size.coerceIn(0.03f, 0.12f)
+    }
+
+    fun toggleSubtitle() {
+        _subtitleEnabled.value = !_subtitleEnabled.value
     }
 
     fun setSourceLang(lang: SttSourceLang) {

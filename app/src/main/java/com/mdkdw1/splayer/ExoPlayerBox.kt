@@ -25,6 +25,7 @@ fun ExoPlayerBox(
     speed: Float,
     subtitleFile: File? = null,
     subtitleSizeFraction: Float = 0.06f,
+    subtitleEnabled: Boolean = true,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -36,9 +37,9 @@ fun ExoPlayerBox(
         }
     }
 
-    LaunchedEffect(url, subtitleFile) {
+    LaunchedEffect(url, subtitleFile, subtitleEnabled) {
         val builder = MediaItem.Builder().setUri(url)
-        if (subtitleFile != null && subtitleFile.exists()) {
+        if (subtitleEnabled && subtitleFile != null && subtitleFile.exists()) {
             val subtitle = MediaItem.SubtitleConfiguration.Builder(Uri.fromFile(subtitleFile))
                 .setMimeType(MimeTypes.APPLICATION_SUBRIP)
                 .setLanguage("ko")
