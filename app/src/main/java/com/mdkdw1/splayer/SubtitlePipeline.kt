@@ -6,6 +6,7 @@ import android.util.Log
 import com.mdkdw1.splayer.audio.AudioDecoder
 import com.mdkdw1.splayer.audio.AudioPaths
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import java.io.File
 
@@ -25,7 +26,7 @@ object SubtitlePipeline {
         val stage: String,
         val percent: Int,
         val message: String = "",
-        val engine: String? = null   // "textra", "google", "original", "cache"
+        val engine: String? = null
     )
 
     // ================== 로컬 파일 ==================
@@ -126,9 +127,9 @@ object SubtitlePipeline {
 
         // ---------- STT ----------
         if (model.isCloud) {
-            onProgress(Progress("stt", 0, "Groq 처리 중..."))
+            onProgress(Progress("stt", 0, "Groq 처리 중...", "groq"))
             val r = GroqStt.transcribe(wavFile, sourceLang) { p ->
-                onProgress(Progress("stt", p, "Groq $p%"))
+                onProgress(Progress("stt", p, "Groq $p%", "groq"))
             }
             if (r == null) { onProgress(Progress("error", 0, "Groq 실패")); return null }
             detectedLang = r.language
@@ -139,7 +140,7 @@ object SubtitlePipeline {
                 onProgress(Progress("error", 0, "모델 미설치")); return null
             }
             val cachedModel = WhisperModelStorage.copyToCache(context, model) ?: return null
-            onProgress(Progress("stt", 0, "음성 인식 중..."))
+            onProgress(Progress("stt", 0, "음성 인식 중...", "local"))
             val threads = Runtime.getRuntime().availableProcessors().coerceAtMost(8)
             val queue = java.util.concurrent.LinkedBlockingQueue<Triple<Long, Long, String>>()
 
@@ -155,7 +156,7 @@ object SubtitlePipeline {
                             if (t.isNotEmpty()) queue.put(Triple(startMs, endMs, t))
                         }
                         override fun onProgress(percent: Int) {
-                            if (percent % 5 == 0 || percent >= 99) onProgress(Progress("stt", percent, "인식 $percent%"))
+                            if (percent % 5 == 0 || percent >= 99) onProgress(Progress("stt", percent, "인식 $percent%", "local"))
                         }
                         override fun onComplete() {}
                         override fun onLog(msg: String) { LogBus.log("JNI", msg) }
@@ -176,8 +177,7 @@ object SubtitlePipeline {
 
         LogBus.log(TAG, "STT 완료: ${rawTexts.size} 세그먼트")
 
-        // ---------- 번역 ----------
-        // 언어 이름 → 2자리 코드 정규화
+        // ---------- 언어 정규화 ----------
         fun normalizeLang(lang: String): String = when (lang.lowercase()) {
             "japanese", "ja", "jp" -> "ja"
             "korean", "ko", "kr" -> "ko"
@@ -197,56 +197,64 @@ object SubtitlePipeline {
 
         val collected = mutableListOf<Segment>()
 
+        // ---------- 번역 ----------
         if (targetLang == actualSource) {
             rawTexts.forEach { (s, e, t) -> collected.add(Segment(s, e, t, t)) }
-        } else {
-            val combinedText = rawTexts.joinToString(SEP) { it.third }
-            LogBus.log(TAG, "통번역 시작: ${rawTexts.size}개, ${combinedText.length}자, src=$actualSource, tgt=$targetLang")
+        } else if (TexTraTranslator.isConfigured()) {
+            // ===== TexTra: 개별 번역 =====
+            LogBus.log(TAG, "★★★ TexTra 개별 번역 모드 ★★★")
+            LogBus.log(TAG, "   총 ${rawTexts.size}개, src=$actualSource → tgt=$targetLang")
+            onProgress(Progress("translate", 0, "TexTra 번역 ($actualSource → $targetLang)", "textra"))
 
-            // === TexTra 키 진단 ===
-            LogBus.log(TAG, "TexTra isConfigured=${TexTraTranslator.isConfigured()}")
-            LogBus.log(TAG, "TEXTA_CLIENT_ID 길이=${BuildConfig.TEXTA_CLIENT_ID.length}")
-            LogBus.log(TAG, "TEXTA_CLIENT_SECRET 길이=${BuildConfig.TEXTA_CLIENT_SECRET.length}")
-            if (BuildConfig.TEXTA_CLIENT_ID.isNotEmpty()) {
-                LogBus.log(TAG, "TEXTA_CLIENT_ID 앞 4자=${BuildConfig.TEXTA_CLIENT_ID.take(4)}")
-            }
-            onProgress(Progress("translate", 0, "통번역 중 ($actualSource → $targetLang)"))
-
-            // suspend 함수 직접 호출 (runBlocking 금지)
-            val combinedTrans: String = try {
-                if (TexTraTranslator.isConfigured()) {
-                    LogBus.log(TAG, "TexTra 시도")
-                    val t = TexTraTranslator.translate(combinedText, targetLang, actualSource)
-                    if (!t.isNullOrBlank()) {
-                        LogBus.log(TAG, "TexTra 성공")
-                        t
-                    } else {
-                        LogBus.log(TAG, "TexTra 실패 → Google 폴백")
-                        GoogleTranslator().translate(combinedText, targetLang, actualSource)
-                    }
-                } else {
-                    LogBus.log(TAG, "TexTra 미설정 → Google")
-                    GoogleTranslator().translate(combinedText, targetLang, actualSource)
+            var textraSuccess = 0
+            rawTexts.forEachIndexed { i, (s, e, t) ->
+                val tr = try {
+                    TexTraTranslator.translate(t, targetLang, actualSource) ?: ""
+                } catch (ex: Exception) {
+                    LogBus.log(TAG, "TexTra [$i] 예외: ${ex.message}")
+                    ""
                 }
+                if (tr.isNotBlank()) textraSuccess++
+                collected.add(Segment(s, e, t, tr))
+                onProgress(
+                    Progress(
+                        "translate",
+                        (i + 1) * 100 / rawTexts.size,
+                        "TexTra ${i + 1}/${rawTexts.size} (성공 $textraSuccess)",
+                        "textra"
+                    )
+                )
+                LogBus.log(TAG, "  [$i/${rawTexts.size}] ${t.take(20)} → ${tr.take(20)}")
+
+                if (i < rawTexts.size - 1) {
+                    try { delay(500) } catch (_: Exception) {}
+                }
+            }
+            LogBus.log(TAG, "★★★ TexTra 완료: ${textraSuccess}/${rawTexts.size} 성공 ★★★")
+        } else {
+            // ===== Google: 통번역 =====
+            val combinedText = rawTexts.joinToString(SEP) { it.third }
+            LogBus.log(TAG, "★★★ Google 통번역 모드 ★★★")
+            LogBus.log(TAG, "   ${rawTexts.size}개, ${combinedText.length}자, src=$actualSource")
+            onProgress(Progress("translate", 0, "Google 통번역 ($actualSource → $targetLang)", "google"))
+
+            val combinedTrans: String = try {
+                GoogleTranslator().translate(combinedText, targetLang, actualSource)
             } catch (e: Exception) {
                 LogBus.log(TAG, "통번역 예외: ${e.message}")
                 ""
             }
 
             if (combinedTrans.isBlank()) {
-                // 폴백: 개별 번역
                 LogBus.log(TAG, "통번역 실패 → 개별 번역 폴백")
                 val g = GoogleTranslator()
                 rawTexts.forEachIndexed { i, (s, e, t) ->
-                    val tr = try {
-                        g.translate(t, targetLang, actualSource)
-                    } catch (ex: Exception) { "" }
+                    val tr = try { g.translate(t, targetLang, actualSource) } catch (ex: Exception) { "" }
                     collected.add(Segment(s, e, t, tr))
-                    onProgress(Progress("translate", (i+1) * 100 / rawTexts.size, "번역 ${i+1}/${rawTexts.size}"))
+                    onProgress(Progress("translate", (i + 1) * 100 / rawTexts.size, "번역 ${i + 1}/${rawTexts.size}", "google"))
                 }
             } else {
                 val parts = combinedTrans.split(SEP).map { it.trim() }
-
                 if (parts.size == rawTexts.size) {
                     rawTexts.forEachIndexed { i, (s, e, t) ->
                         collected.add(Segment(s, e, t, parts[i]))
@@ -261,8 +269,7 @@ object SubtitlePipeline {
                         if (remainSegs <= 0 || pi >= parts.size) {
                             collected.add(Segment(s, e, t, ""))
                         } else {
-                            val take = if (remainSegs == 1) remainParts
-                                       else maxOf(1, remainParts / remainSegs)
+                            val take = if (remainSegs == 1) remainParts else maxOf(1, remainParts / remainSegs)
                             val chunk = parts.subList(pi, minOf(pi + take, parts.size)).joinToString(" ")
                             pi += take
                             collected.add(Segment(s, e, t, chunk))
@@ -276,10 +283,8 @@ object SubtitlePipeline {
         val merged = mergeSegments(collected)
         LogBus.log(TAG, "병합 후: ${merged.size} 세그먼트")
 
-        // 최종 UI 반영
         merged.forEach { onSegment(it) }
 
-        // SRT 저장
         val srtFile = File(AudioPaths.subtitleDir(context), "test_${targetLang}.srt")
         writeSrt(srtFile, merged)
         LogBus.log(TAG, "SRT: ${srtFile.absolutePath}")
