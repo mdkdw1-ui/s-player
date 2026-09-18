@@ -230,7 +230,7 @@ object SubtitlePipeline {
 
             val total = rawTexts.size
             val results = arrayOfNulls<String>(total)
-            val semaphore = kotlinx.coroutines.sync.Semaphore(3)
+            val semaphore = kotlinx.coroutines.sync.Semaphore(6)
             val doneCount = java.util.concurrent.atomic.AtomicInteger(0)
             val successCount = java.util.concurrent.atomic.AtomicInteger(0)
 
