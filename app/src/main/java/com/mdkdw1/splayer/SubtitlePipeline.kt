@@ -176,9 +176,21 @@ object SubtitlePipeline {
         LogBus.log(TAG, "STT 완료: ${rawTexts.size} 세그먼트")
 
         // ---------- 번역 ----------
+        // 언어 이름 → 2자리 코드 정규화
+        fun normalizeLang(lang: String): String = when (lang.lowercase()) {
+            "japanese", "ja", "jp" -> "ja"
+            "korean", "ko", "kr" -> "ko"
+            "english", "en" -> "en"
+            "chinese", "zh", "cn" -> "zh"
+            "spanish", "es" -> "es"
+            "french", "fr" -> "fr"
+            "german", "de" -> "de"
+            else -> lang.lowercase().take(2)
+        }
+
         val actualSource = when {
-            sourceLang != "auto" -> sourceLang
-            detectedLang != null -> detectedLang!!
+            sourceLang != "auto" -> normalizeLang(sourceLang)
+            detectedLang != null -> normalizeLang(detectedLang!!)
             else -> "ja"
         }
 
