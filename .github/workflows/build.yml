@@ -45,6 +45,8 @@ jobs:
       - name: Build with Gradle
         env:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          TEXTA_CLIENT_ID: ${{ secrets.TEXTA_CLIENT_ID }}
+          TEXTA_CLIENT_SECRET: ${{ secrets.TEXTA_CLIENT_SECRET }}
         run: gradle assembleDebug
 
       - name: Upload APK

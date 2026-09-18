@@ -22,6 +22,18 @@ android {
             "\"${System.getenv("GROQ_API_KEY") ?: ""}\""
         )
 
+        // NICT TexTra API 키 (GitHub Secret 에서 주입)
+        buildConfigField(
+            "String",
+            "TEXTA_CLIENT_ID",
+            "\"${System.getenv("TEXTA_CLIENT_ID") ?: ""}\""
+        )
+        buildConfigField(
+            "String",
+            "TEXTA_CLIENT_SECRET",
+            "\"${System.getenv("TEXTA_CLIENT_SECRET") ?: ""}\""
+        )
+
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a")
         }
