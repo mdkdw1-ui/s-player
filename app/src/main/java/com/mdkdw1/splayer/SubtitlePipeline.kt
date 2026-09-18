@@ -175,58 +175,64 @@ object SubtitlePipeline {
 
         LogBus.log(TAG, "STT 완료: ${rawTexts.size} 세그먼트")
 
-        // ---------- 번역 (통으로 + 분할) ----------
+        // ---------- 번역 ----------
         val actualSource = when {
             sourceLang != "auto" -> sourceLang
             detectedLang != null -> detectedLang!!
-            else -> "en"
+            else -> "ja"
         }
 
-        val translator = GoogleTranslator()
         val collected = mutableListOf<Segment>()
 
         if (targetLang == actualSource) {
-            // 번역 불필요
             rawTexts.forEach { (s, e, t) -> collected.add(Segment(s, e, t, t)) }
         } else {
-            // **방식 C**: 전체를 SEP 로 이어붙여 한 번에 번역
             val combinedText = rawTexts.joinToString(SEP) { it.third }
-            LogBus.log(TAG, "통번역 시작: ${rawTexts.size}개, ${combinedText.length}자")
+            LogBus.log(TAG, "통번역 시작: ${rawTexts.size}개, ${combinedText.length}자, src=$actualSource, tgt=$targetLang")
             onProgress(Progress("translate", 0, "통번역 중 ($actualSource → $targetLang)"))
 
-            val combinedTrans = try {
-                kotlinx.coroutines.runBlocking {
-                    translator.translate(combinedText, targetLang, actualSource)
+            // suspend 함수 직접 호출 (runBlocking 금지)
+            val combinedTrans: String = try {
+                if (TexTraTranslator.isConfigured()) {
+                    LogBus.log(TAG, "TexTra 시도")
+                    val t = TexTraTranslator.translate(combinedText, targetLang, actualSource)
+                    if (!t.isNullOrBlank()) {
+                        LogBus.log(TAG, "TexTra 성공")
+                        t
+                    } else {
+                        LogBus.log(TAG, "TexTra 실패 → Google 폴백")
+                        GoogleTranslator().translate(combinedText, targetLang, actualSource)
+                    }
+                } else {
+                    LogBus.log(TAG, "TexTra 미설정 → Google")
+                    GoogleTranslator().translate(combinedText, targetLang, actualSource)
                 }
             } catch (e: Exception) {
-                LogBus.log(TAG, "통번역 실패: ${e.message}")
+                LogBus.log(TAG, "통번역 예외: ${e.message}")
                 ""
             }
 
             if (combinedTrans.isBlank()) {
                 // 폴백: 개별 번역
                 LogBus.log(TAG, "통번역 실패 → 개별 번역 폴백")
+                val g = GoogleTranslator()
                 rawTexts.forEachIndexed { i, (s, e, t) ->
                     val tr = try {
-                        kotlinx.coroutines.runBlocking { translator.translate(t, targetLang, actualSource) }
+                        g.translate(t, targetLang, actualSource)
                     } catch (ex: Exception) { "" }
                     collected.add(Segment(s, e, t, tr))
                     onProgress(Progress("translate", (i+1) * 100 / rawTexts.size, "번역 ${i+1}/${rawTexts.size}"))
                 }
             } else {
-                // SEP 로 분할
                 val parts = combinedTrans.split(SEP).map { it.trim() }
 
                 if (parts.size == rawTexts.size) {
-                    // 완벽 매칭
                     rawTexts.forEachIndexed { i, (s, e, t) ->
                         collected.add(Segment(s, e, t, parts[i]))
                     }
                     LogBus.log(TAG, "통번역 성공: ${parts.size}개 매칭")
                 } else {
-                    // 개수 불일치 → 순서대로 매핑 + 나머지는 병합
                     LogBus.log(TAG, "세그먼트 수 불일치: 원본 ${rawTexts.size}, 번역 ${parts.size}")
-                    // 인접 세그먼트끼리 시간 기반 병합 후 재매핑
                     var pi = 0
                     rawTexts.forEachIndexed { i, (s, e, t) ->
                         val remainSegs = rawTexts.size - i
@@ -265,7 +271,7 @@ object SubtitlePipeline {
         return srtFile
     }
 
-    // ================== 세그먼트 병합 ==================
+    // ================== 병합 ==================
     private fun mergeSegments(segments: List<Segment>): List<Segment> {
         if (segments.isEmpty()) return segments
         val out = mutableListOf<Segment>()
