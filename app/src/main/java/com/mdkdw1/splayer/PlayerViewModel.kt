@@ -33,7 +33,8 @@ data class SttState(
     val percent: Int = 0,
     val message: String = "",
     val segments: List<SubtitlePipeline.Segment> = emptyList(),
-    val srtPath: String? = null
+    val srtPath: String? = null,
+    val engine: String? = null   // "textra", "google", "cache", "original"
 )
 
 data class WhisperModelStatus(
@@ -228,7 +229,9 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
                 sourceLang = _sourceLang.value.code,
                 targetLang = "ko",
                 onProgress = { p ->
-                    _sttState.value = _sttState.value.copy(stage = p.stage, percent = p.percent, message = p.message)
+                    _sttState.value = _sttState.value.copy(
+                        stage = p.stage, percent = p.percent, message = p.message, engine = p.engine
+                    )
                     LogBus.log("STT", "${p.stage} ${p.percent}% ${p.message}")
                 },
                 onSegment = { seg -> addSegment(seg) },
@@ -262,7 +265,9 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
                 sourceLang = _sourceLang.value.code,
                 targetLang = "ko",
                 onProgress = { p ->
-                    _sttState.value = _sttState.value.copy(stage = p.stage, percent = p.percent, message = p.message)
+                    _sttState.value = _sttState.value.copy(
+                        stage = p.stage, percent = p.percent, message = p.message, engine = p.engine
+                    )
                     LogBus.log("URL", "${p.stage} ${p.percent}% ${p.message}")
                 },
                 onSegment = { seg -> addSegment(seg) },

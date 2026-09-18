@@ -9,6 +9,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -349,6 +350,24 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel()) {
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text("STT 결과 (${sttState.segments.size})", color = Color.White, fontSize = 13.sp)
+                        // === 엔진 뱃지 ===
+                        sttState.engine?.let { eng ->
+                            Spacer(Modifier.width(6.dp))
+                            val (label, color) = when (eng) {
+                                "textra" -> "NICT" to Color(0xFF7CB9E8)
+                                "google" -> "Google" to Color(0xFFF4B400)
+                                "cache" -> "캐시" to Color(0xFF9E9E9E)
+                                "original" -> "원문" to Color(0xFF9E9E9E)
+                                else -> eng to Color(0xFF9E9E9E)
+                            }
+                            Box(
+                                modifier = Modifier
+                                    .background(color.copy(alpha = 0.3f), RoundedCornerShape(4.dp))
+                                    .padding(horizontal = 6.dp, vertical = 2.dp)
+                            ) {
+                                Text(label, color = Color.White, fontSize = 10.sp)
+                            }
+                        }
                         Spacer(Modifier.width(8.dp))
 
                         // 언어 선택 드롭다운
@@ -470,7 +489,33 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel()) {
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Column(modifier = Modifier.weight(1f)) {
-                        Text("[${sttState.stage}] ${sttState.message}", fontSize = 11.sp)
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text("[${sttState.stage}]", fontSize = 11.sp)
+                            sttState.engine?.let { eng ->
+                                Spacer(Modifier.width(4.dp))
+                                val label = when (eng) {
+                                    "textra" -> "NICT"
+                                    "google" -> "Google"
+                                    "cache" -> "캐시"
+                                    "original" -> "원문"
+                                    else -> eng
+                                }
+                                val c = when (eng) {
+                                    "textra" -> Color(0xFF7CB9E8)
+                                    "google" -> Color(0xFFF4B400)
+                                    else -> Color.Gray
+                                }
+                                Box(
+                                    modifier = Modifier
+                                        .background(c.copy(alpha = 0.3f), RoundedCornerShape(3.dp))
+                                        .padding(horizontal = 4.dp, vertical = 1.dp)
+                                ) {
+                                    Text(label, color = Color.White, fontSize = 9.sp)
+                                }
+                            }
+                            Spacer(Modifier.width(4.dp))
+                            Text(sttState.message, fontSize = 11.sp)
+                        }
                         if (sttState.running) {
                             LinearProgressIndicator(
                                 progress = { sttState.percent / 100f },

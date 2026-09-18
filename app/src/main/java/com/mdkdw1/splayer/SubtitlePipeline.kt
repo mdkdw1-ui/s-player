@@ -24,7 +24,8 @@ object SubtitlePipeline {
     data class Progress(
         val stage: String,
         val percent: Int,
-        val message: String = ""
+        val message: String = "",
+        val engine: String? = null   // "textra", "google", "original", "cache"
     )
 
     // ================== 로컬 파일 ==================
@@ -71,7 +72,7 @@ object SubtitlePipeline {
 
         if (SubtitleCache.exists(context, url, targetLang)) {
             LogBus.log(TAG, "캐시 히트!")
-            onProgress(Progress("cache", 100, "캐시된 자막 로드"))
+            onProgress(Progress("cache", 100, "캐시된 자막 로드", "cache"))
             val srt = SubtitleCache.read(context, url, targetLang)
             if (srt != null) {
                 SubtitleCache.parseSrt(srt).forEach { onSegment(it) }
@@ -287,7 +288,8 @@ object SubtitlePipeline {
             SubtitleCache.write(context, cacheSourceKey, targetLang, srtFile.readText())
         }
 
-        onProgress(Progress("done", 100, "완료: ${merged.size} 세그먼트"))
+        val finalEngine = if (TexTraTranslator.isConfigured()) "textra" else "google"
+        onProgress(Progress("done", 100, "완료: ${merged.size} 세그먼트 ($finalEngine)", finalEngine))
         return srtFile
     }
 
