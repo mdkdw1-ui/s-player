@@ -212,18 +212,18 @@ object SubtitlePipeline {
 
             val total = rawTexts.size
             val results = arrayOfNulls<String>(total)
-            val semaphore = kotlinx.coroutines.sync.Semaphore(3)  // 동시 3개
-            var doneCount = java.util.concurrent.atomic.AtomicInteger(0)
-            var successCount = java.util.concurrent.atomic.AtomicInteger(0)
+            val semaphore = kotlinx.coroutines.sync.Semaphore(3)
+            val doneCount = java.util.concurrent.atomic.AtomicInteger(0)
+            val successCount = java.util.concurrent.atomic.AtomicInteger(0)
 
             val startTime = System.currentTimeMillis()
 
             kotlinx.coroutines.coroutineScope {
-                rawTexts.forEachIndexed { i, (_, _, t) ->
-                    kotlinx.coroutines.launch(Dispatchers.IO) {
+                rawTexts.forEachIndexed { i, triple ->
+                    launch(Dispatchers.IO) {
                         semaphore.withPermit {
                             val tr = try {
-                                TexTraTranslator.translate(t, targetLang, actualSource) ?: ""
+                                TexTraTranslator.translate(triple.third, targetLang, actualSource) ?: ""
                             } catch (ex: Exception) {
                                 LogBus.log(TAG, "TexTra [$i] 예외: ${ex.message}")
                                 ""
@@ -242,7 +242,7 @@ object SubtitlePipeline {
                                     "textra"
                                 )
                             )
-                            LogBus.log(TAG, "  [$done/$total] ${t.take(20)} → ${tr.take(20)}")
+                            LogBus.log(TAG, "  [$done/$total] ${triple.third.take(20)} → ${tr.take(20)}")
                         }
                     }
                 }
