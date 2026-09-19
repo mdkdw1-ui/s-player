@@ -175,6 +175,11 @@ fun WebViewBox(
                         url?.let { onUrlChanged(it) }
                         onLog("page started: $url")
                         pageGeneration++
+
+                        // ★ 광고 스크립트 사전 차단 (missav 등)
+                        if (url?.contains("missav") == true) {
+                            view?.evaluateJavascript(AD_BLOCK_JS, null)
+                        }
                     }
 
                     override fun onPageFinished(view: WebView?, url: String?) {
@@ -204,6 +209,13 @@ fun WebViewBox(
                         view: WebView?, request: WebResourceRequest?
                     ): Boolean {
                         val target = request?.url?.toString() ?: return false
+
+                        // ===== 광고/팝업 차단 =====
+                        if (shouldBlockUrl(target)) {
+                            onLog("🚫 차단: ${target.take(80)}")
+                            return true  // 로드 차단
+                        }
+
                         onUrlChanged(target)
                         view?.loadUrl(target)
                         return true
@@ -230,3 +242,167 @@ fun WebViewBox(
         }
     }
 }
+
+
+/**
+ * 광고/팝업/트래커 도메인 차단.
+ * missav 등 성인 사이트의 aggressive 광고 대응.
+ */
+private fun shouldBlockUrl(url: String): Boolean {
+    val lower = url.lowercase()
+
+    // 1. 알려진 광고/팝업 패턴
+    val blockPatterns = listOf(
+        "/pop?url=",              // missav 광고 팝업
+        "/popup",
+        "/ad/", "/ads/", "/adv/",
+        "doubleclick.net",
+        "googlesyndication.com",
+        "googleadservices.com",
+        "adservice.google",
+        "popads.net",
+        "popcash.net",
+        "exoclick.com",
+        "juicyads.com",
+        "trafficjunky.net",
+        "adsterra.com",
+        "propellerads.com",
+        "hilltopads.net",
+        "clickadu.com",
+        "onclickads.net",
+        "mgid.com",
+        "taboola.com",
+        "outbrain.com",
+        "diffusedpassionquaking",   // 로그에서 확인된 도메인
+        "traffic-media.co",
+        "tsyndicate.com",
+        "ad-maven.com",
+        "revcontent.com",
+    )
+
+    for (pattern in blockPatterns) {
+        if (lower.contains(pattern)) return true
+    }
+
+    // 2. missav 도메인 화이트리스트 (그 외는 차단)
+    val allowedDomains = listOf(
+        "missav.ws",
+        "missav01.com",
+        "missav.ai",
+        "missav123.com",
+        "missav.com",
+        "mymissav.com",
+        "about:blank",
+        "data:",
+        "blob:",
+    )
+    for (domain in allowedDomains) {
+        if (lower.contains(domain)) return false
+    }
+
+    // 3. 정상 사이트 (YouTube, Vimeo 등) 는 허용
+    val normalDomains = listOf(
+        "youtube.com", "youtu.be",
+        "vimeo.com",
+        "google.com",
+        "w3schools.com",
+        "cnn.com",
+        "wikipedia.org",
+        "soundcloud.com",
+    )
+    for (domain in normalDomains) {
+        if (lower.contains(domain)) return false
+    }
+
+    // 4. 그 외 외부 도메인은 차단 (광고 가능성)
+    // → 하지만 정상 링크도 있을 수 있으니, http(s) 로 시작하는 외부 도메인만 조건부 차단
+    // 일단 로그만 남기고 허용 (필요시 차단으로 변경)
+    android.util.Log.d("WebViewBox", "허용: $url")
+    return false
+}
+
+
+/**
+ * 광고 스크립트 사전 차단 (missav 등 성인 사이트용).
+ * - window.open 후킹
+ * - 클릭 하이재킹 방지
+ * - 광고 overlay 제거
+ */
+private val AD_BLOCK_JS = """
+(function() {
+  try {
+    // window.open 차단
+    window.open = function() {
+      console.log('[ADBLOCK] window.open 차단');
+      return null;
+    };
+
+    // location 변경 후킹 (외부 도메인 이동 차단)
+    var origAssign = location.assign;
+    var origReplace = location.replace;
+    var allowed = ['missav.ws', 'missav01.com', 'missav.ai', 'missav.com'];
+
+    function checkUrl(url) {
+      if (!url) return false;
+      for (var i = 0; i < allowed.length; i++) {
+        if (url.indexOf(allowed[i]) !== -1) return false;
+      }
+      return true;  // 차단 대상
+    }
+
+    try {
+      Object.defineProperty(location, 'href', {
+        set: function(url) {
+          if (checkUrl(url)) {
+            console.log('[ADBLOCK] href 이동 차단: ' + url);
+          } else {
+            window.location.href = url;
+          }
+        }
+      });
+    } catch (e) {}
+
+    // 클릭 하이재킹 방지 (a 태그 광고)
+    document.addEventListener('click', function(e) {
+      var a = e.target.closest && e.target.closest('a');
+      if (a && a.href && checkUrl(a.href)) {
+        console.log('[ADBLOCK] 링크 차단: ' + a.href);
+        e.preventDefault();
+        e.stopPropagation();
+        return false;
+      }
+    }, true);
+
+    // 광고 overlay 자동 제거 (주기적)
+    setInterval(function() {
+      // 일반적인 광고 overlay 셀렉터
+      var adSelectors = [
+        '[class*="popup"]',
+        '[class*="overlay"]',
+        '[id*="popup"]',
+        '[id*="ad-"]',
+        '[class*="ad-wrap"]',
+        'iframe[src*="ad"]',
+        'iframe[src*="pop"]',
+      ];
+      adSelectors.forEach(function(sel) {
+        document.querySelectorAll(sel).forEach(function(el) {
+          if (el.style && !el.__adblockChecked) {
+            el.__adblockChecked = true;
+            var src = (el.src || '') + (el.href || '');
+            for (var i = 0; i < allowed.length; i++) {
+              if (src.indexOf(allowed[i]) !== -1) return;  // missav 자체는 유지
+            }
+            // 3초 후 제거 (깜빡임 방지)
+            setTimeout(function() { if (el.parentNode) el.style.display = 'none'; }, 100);
+          }
+        });
+      });
+    }, 2000);
+
+    console.log('[ADBLOCK] 활성화');
+  } catch (e) {
+    console.log('[ADBLOCK] 실패: ' + e);
+  }
+})();
+""".trimIndent()
