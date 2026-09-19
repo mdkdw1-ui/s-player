@@ -102,6 +102,10 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     private val _subtitleEnabled = MutableStateFlow(true)
     val subtitleEnabled: StateFlow<Boolean> = _subtitleEnabled
 
+    // 자막 싱크 오프셋 (초 단위, -3.0 ~ +3.0)
+    private val _subtitleOffset = MutableStateFlow(0f)
+    val subtitleOffset: StateFlow<Float> = _subtitleOffset
+
     // ===== 실시간 자막 트랙 (오버레이용) =====
     private val _subtitleTrack = MutableStateFlow<List<SubtitlePipeline.Segment>>(emptyList())
     val subtitleTrack: StateFlow<List<SubtitlePipeline.Segment>> = _subtitleTrack
@@ -351,6 +355,11 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
             )
             _streamingStt.value = false
         }
+    }
+
+    fun setSubtitleOffset(sec: Float) {
+        _subtitleOffset.value = sec.coerceIn(-3f, 3f)
+        LogBus.log("VM", "자막 오프셋: %.1f초".format(sec))
     }
 
     fun setSubtitleSize(size: Float) {
