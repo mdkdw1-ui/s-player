@@ -51,7 +51,17 @@ object GroqStt {
         // 단일 파일
         if (wavFile.length() <= MAX_CHUNK_BYTES) {
             LogBus.log(TAG, "단일 파일 (${wavFile.length() / 1024}KB)")
-            return@withContext transcribeSingle(wavFile, language, 0L, onProgress)
+            val result = transcribeSingle(wavFile, language, 0L, onProgress)
+            // ★ 단일 파일 콜백 (스트리밍 지원)
+            if (result != null && onChunkComplete != null) {
+                try {
+                    onChunkComplete(result.segments, 0, 1)
+                    LogBus.log(TAG, "★ 단일 파일 콜백: ${result.segments.size}개 세그먼트")
+                } catch (e: Exception) {
+                    LogBus.log(TAG, "onChunkComplete 예외: ${e.message}")
+                }
+            }
+            return@withContext result
         }
 
         // 청크 병렬
