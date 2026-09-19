@@ -118,7 +118,7 @@ object StreamDownloader {
                                         val n = input.read(buf)
                                         if (n <= 0) break
                                         raf.write(buf, 0, n)
-                                        downloaded[i] += n
+                                        downloaded[i] = downloaded[i] + n
 
                                         val totalDone = synchronized(lock) { downloaded.sum() }
                                         onProgress(totalDone.toFloat() / totalSize)
