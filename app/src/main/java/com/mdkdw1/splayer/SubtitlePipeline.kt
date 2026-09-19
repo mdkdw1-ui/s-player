@@ -341,25 +341,8 @@ object SubtitlePipeline {
 
     // ================== 병합 ==================
     private fun mergeSegments(segments: List<Segment>): List<Segment> {
-        if (segments.isEmpty()) return segments
-        val out = mutableListOf<Segment>()
-        var cur = segments[0]
-        for (i in 1 until segments.size) {
-            val next = segments[i]
-            val duration = cur.endMs - cur.startMs
-            val gap = next.startMs - cur.endMs
-            val combinedText = (cur.original + " " + next.original).trim()
-            val combinedTrans = (cur.translated + " " + next.translated).trim()
-            val shouldMerge = duration < 1500 && gap < 500 &&
-                combinedText.length < 120 && combinedTrans.length < 80
-            if (shouldMerge) {
-                cur = cur.copy(endMs = next.endMs, original = combinedText, translated = combinedTrans)
-            } else {
-                out.add(cur); cur = next
-            }
-        }
-        out.add(cur)
-        return out
+        // 병합 비활성화 (no-op): Word-based 재구성으로 이미 최적화됨
+        return segments
     }
 
     // ================== 유틸 ==================
@@ -406,4 +389,149 @@ object SubtitlePipeline {
         val s = (ms % 60_000) / 1000; val msec = ms % 1000
         return "%02d:%02d:%02d,%03d".format(h, m, s, msec)
     }
+
+    // ================== URL 스트리밍 (첫 청크 즉시 재생) ==================
+    suspend fun runFromUrlStreaming(
+        context: Context,
+        url: String,
+        model: WhisperModel,
+        sourceLang: String = "auto",
+        targetLang: String = "ko",
+        onProgress: (Progress) -> Unit,
+        onSegmentReady: (Segment) -> Unit,     // 실시간 자막 추가
+        onPlayableReady: () -> Unit,            // 재생 시작 트리거
+        onStreamInfo: (StreamResult) -> Unit = {},
+        onLanguageDetected: (String) -> Unit = {}
+    ): File? = withContext(Dispatchers.IO) {
+        LogBus.log(TAG, "=== URL STREAMING START (model=${model.id})")
+
+        // 캐시 히트 → 즉시 재생
+        if (SubtitleCache.exists(context, url, targetLang)) {
+            LogBus.log(TAG, "캐시 히트! 즉시 로드")
+            onProgress(Progress("cache", 100, "캐시된 자막 로드", "cache"))
+            val srt = SubtitleCache.read(context, url, targetLang)
+            if (srt != null) {
+                SubtitleCache.parseSrt(srt).forEach { onSegmentReady(it) }
+                onPlayableReady()
+                return@withContext SubtitleCache.srtFile(context, url, targetLang)
+            }
+        }
+
+        // 스트림 추출
+        onProgress(Progress("extract", 0, "영상 정보 추출 중..."))
+        val info = StreamExtractor.extract(url).getOrNull()
+        if (info == null) {
+            onProgress(Progress("error", 0, "스트림 추출 실패"))
+            return@withContext null
+        }
+        onStreamInfo(info)
+        onProgress(Progress("extract", 100, "${info.title} (${info.durationSec}s)"))
+
+        val audioUrl = info.audioUrl ?: info.videoUrl
+        if (audioUrl == null) {
+            onProgress(Progress("error", 0, "오디오 스트림 없음"))
+            return@withContext null
+        }
+        val ext = guessExt(info.audioMimeType ?: info.videoMimeType)
+
+        // 다운로드
+        onProgress(Progress("download", 0, "다운로드 시작..."))
+        val audioFile = StreamDownloader.download(context, audioUrl, "url_input", ext) { p ->
+            onProgress(Progress("download", (p * 100).toInt(), "다운로드 ${(p*100).toInt()}%"))
+        }
+        if (audioFile == null) {
+            onProgress(Progress("error", 0, "다운로드 실패"))
+            return@withContext null
+        }
+        onProgress(Progress("download", 100, "다운로드 완료"))
+
+        // 디코딩
+        onProgress(Progress("decode", 0, "오디오 디코딩 중..."))
+        val wavFile = AudioPaths.tempWav(context, "test_stream")
+        if (wavFile.exists()) wavFile.delete()
+        val decodeOk = try { AudioDecoder.decodeToWav(audioFile, wavFile) }
+        catch (e: Exception) { LogBus.log(TAG, "디코딩 예외: ${e.message}"); false }
+        if (!decodeOk || !wavFile.exists()) {
+            onProgress(Progress("error", 0, "디코딩 실패"))
+            return@withContext null
+        }
+        onProgress(Progress("decode", 100, "디코딩 완료"))
+
+        // ===== Groq 청크별 STT + 번역 (스트리밍) =====
+        if (!model.isCloud) {
+            LogBus.log(TAG, "스트리밍은 Groq 전용. 로컬 모델은 전체 처리.")
+            return@withContext null
+        }
+
+        val collected = mutableListOf<Segment>()
+        val translatorReady = TexTraTranslator.isConfigured()
+        val allSegmentsLock = Object()
+        var detectedLang: String? = null
+        var playableTriggered = false
+
+        val groqResult = GroqStt.transcribe(
+            wavFile = wavFile,
+            language = sourceLang,
+            firstChunkMaxBytes = 2 * 1024 * 1024,     // 첫 청크 ~1분
+            chunkMaxBytes = 15 * 1024 * 1024,          // 이후 ~8분
+            onChunkComplete = { segments, chunkIdx, total ->
+                LogBus.log(TAG, "▶ 청크 ${chunkIdx + 1}/$total 세그먼트 ${segments.size}개 도착")
+
+                // 언어 정규화
+                fun normalizeLang(lang: String): String = when (lang.lowercase()) {
+                    "japanese", "ja", "jp" -> "ja"
+                    "korean", "ko", "kr" -> "ko"
+                    "english", "en" -> "en"
+                    "chinese", "zh", "cn" -> "zh"
+                    "spanish", "es" -> "es"
+                    "latin", "la", "unknown", "und", "" -> "auto"
+                    else -> lang.lowercase().take(2)
+                }
+                val actualSource = if (sourceLang != "auto") normalizeLang(sourceLang)
+                                   else normalizeLang(detectedLang ?: "ja")
+
+                // 각 세그먼트 번역 + 콜백
+                segments.forEach { seg ->
+                    val tr = try {
+                        if (translatorReady) TexTraTranslator.translate(seg.text, targetLang, actualSource) ?: ""
+                        else GoogleTranslator().translate(seg.text, targetLang, actualSource)
+                    } catch (e: Exception) { "" }
+
+                    val finalSeg = Segment(seg.startMs, seg.endMs, seg.text, tr)
+                    synchronized(allSegmentsLock) { collected.add(finalSeg) }
+                    onSegmentReady(finalSeg)
+                }
+
+                // 첫 청크 완료 → 재생 시작
+                if (!playableTriggered && chunkIdx == 0) {
+                    playableTriggered = true
+                    LogBus.log(TAG, "★★★ 첫 청크 준비 완료 → 재생 시작 ★★★")
+                    onPlayableReady()
+                }
+            },
+            onProgress = { p ->
+                onProgress(Progress("stt", p, "Groq $p%", "groq"))
+            }
+        )
+
+        // 최종 SRT 저장
+        val finalSegments = synchronized(allSegmentsLock) { collected.toList() }
+        val srtFile = File(AudioPaths.subtitleDir(context), "test_${targetLang}.srt")
+        writeSrt(srtFile, finalSegments)
+        LogBus.log(TAG, "SRT 저장: ${srtFile.absolutePath} (${finalSegments.size}개)")
+
+        SubtitleCache.write(context, url, targetLang, srtFile.readText())
+
+        if (!playableTriggered) {
+            onPlayableReady()  // 실패한 경우라도 재생은 시작
+        }
+
+        onProgress(Progress("done", 100, "완료: ${finalSegments.size} 세그먼트"))
+        return@withContext srtFile
+    }
+
 }
+
+// ============================================================================
+// 아래 함수는 SubtitlePipeline object 안에 추가해야 함 (별도 함수 아님)
+// ============================================================================

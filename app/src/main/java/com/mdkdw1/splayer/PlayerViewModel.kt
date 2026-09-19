@@ -102,6 +102,16 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     private val _subtitleEnabled = MutableStateFlow(true)
     val subtitleEnabled: StateFlow<Boolean> = _subtitleEnabled
 
+    // ===== 실시간 자막 트랙 (오버레이용) =====
+    private val _subtitleTrack = MutableStateFlow<List<SubtitlePipeline.Segment>>(emptyList())
+    val subtitleTrack: StateFlow<List<SubtitlePipeline.Segment>> = _subtitleTrack
+
+    private val _playbackPositionMs = MutableStateFlow(0L)
+    val playbackPositionMs: StateFlow<Long> = _playbackPositionMs
+
+    private val _streamingStt = MutableStateFlow(false)
+    val streamingStt: StateFlow<Boolean> = _streamingStt
+
     // ===== 웹 편의성 상태 =====
     private val _history = MutableStateFlow<List<WebPrefs.HistoryItem>>(emptyList())
     val history: StateFlow<List<WebPrefs.HistoryItem>> = _history
@@ -271,6 +281,76 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
 
     fun reloadWebView() {
         _webViewReloadKey.value = _webViewReloadKey.value + 1
+    }
+
+    fun appendSubtitleSegment(seg: SubtitlePipeline.Segment) {
+        _subtitleTrack.value = _subtitleTrack.value + seg
+    }
+
+    fun clearSubtitleTrack() {
+        _subtitleTrack.value = emptyList()
+    }
+
+    fun updatePlaybackPosition(ms: Long) {
+        _playbackPositionMs.value = ms
+    }
+
+    // ===== 스트리밍 STT (첫 청크 재생) =====
+    fun runUrlSttStreaming(url: String) {
+        if (_sttState.value.running) return
+        val model = _whisperModel.value.model
+        if (!model.isCloud && !_whisperModel.value.installed) {
+            LogBus.log("STT", "로컬 모델 미설치")
+            return
+        }
+
+        resetSegmentBuffer()
+        clearSubtitleTrack()
+        _sttState.value = SttState(running = true, stage = "start", percent = 0)
+        _streamingStt.value = true
+
+        viewModelScope.launch(Dispatchers.IO) {
+            val srt = SubtitlePipeline.runFromUrlStreaming(
+                context = getApplication(),
+                url = url,
+                model = model,
+                sourceLang = _sourceLang.value.code,
+                targetLang = "ko",
+                onProgress = { p ->
+                    _sttState.value = _sttState.value.copy(
+                        stage = p.stage, percent = p.percent, message = p.message, engine = p.engine
+                    )
+                    LogBus.log("STREAM", "${p.stage} ${p.percent}% ${p.message}")
+                },
+                onSegmentReady = { seg ->
+                    appendSubtitleSegment(seg)
+                    addSegment(seg)  // 기존 STT 결과 리스트에도 추가
+                },
+                onPlayableReady = {
+                    // Local 모드 전환 + 첫 자막과 함께 재생 시작
+                    _lastStreamInfo.value?.let { info ->
+                        val playUrl = info.videoUrl
+                        if (playUrl != null) {
+                            _videoUrl.value = playUrl
+                            _mode.value = PlayerMode.LOCAL
+                            LogBus.log("VM", "스트리밍 재생 시작")
+                        }
+                    }
+                },
+                onStreamInfo = { info ->
+                    _lastStreamInfo.value = info
+                    LogBus.log("URL", "제목: ${info.title}, ${info.durationSec}초")
+                },
+                onLanguageDetected = { lang -> _detectedLang.value = lang }
+            )
+            flushSegments()
+            _sttState.value = _sttState.value.copy(
+                running = false,
+                srtPath = srt?.absolutePath,
+                stage = if (srt != null) "done" else "error"
+            )
+            _streamingStt.value = false
+        }
     }
 
     fun setSubtitleSize(size: Float) {

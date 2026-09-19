@@ -21,6 +21,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.BugReport
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Translate
 import androidx.compose.material3.FilterChip
@@ -67,6 +68,10 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel()) {
     val bookmarks by vm.bookmarks.collectAsState()
     val desktopUA by vm.desktopUA.collectAsState()
     val webViewReloadKey by vm.webViewReloadKey.collectAsState()
+    val subtitleOffset by vm.subtitleOffset.collectAsState()
+    val subtitleTrack by vm.subtitleTrack.collectAsState()
+    val playbackPositionMs by vm.playbackPositionMs.collectAsState()
+    val streamingStt by vm.streamingStt.collectAsState()
 
     var webViewRef by remember { mutableStateOf<WebView?>(null) }
     var langMenuOpen by remember { mutableStateOf(false) }
@@ -135,13 +140,24 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel()) {
                     Icon(Icons.Default.Folder, contentDescription = "파일 STT")
                 }
 
-                // URL STT
+                // URL STT (기존)
                 if (urlInput.isNotBlank()) {
                     IconButton(onClick = {
                         vm.runUrlStt(urlInput)
                         sttPanelOpen = true
                     }) {
-                        Icon(Icons.Default.Translate, contentDescription = "URL STT")
+                        Icon(Icons.Default.Translate, contentDescription = "URL STT (전체)")
+                    }
+                    // 스트리밍 STT (첫 청크 재생)
+                    IconButton(onClick = {
+                        vm.runUrlSttStreaming(urlInput)
+                        sttPanelOpen = true
+                    }) {
+                        Icon(
+                            Icons.Default.PlayArrow,
+                            contentDescription = "URL STT (스트리밍)",
+                            tint = MaterialTheme.colorScheme.primary
+                        )
                     }
                 }
 
@@ -437,6 +453,12 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel()) {
         }
 
         // 본문 영역
+        // 현재 재생 시간에 맞는 자막 (오버레이용)
+        val currentLiveCue = remember(subtitleTrack, playbackPositionMs, subtitleOffset) {
+            val adjustedPos = playbackPositionMs - (subtitleOffset * 1000).toLong()
+            subtitleTrack.lastOrNull { adjustedPos in it.startMs..it.endMs }
+        }
+
         Box(modifier = Modifier.weight(1f)) {
             if (sttPanelOpen) {
                 // STT 결과 패널
@@ -554,6 +576,9 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel()) {
                         subtitleFile = sttState.srtPath?.let { java.io.File(it) },
                         subtitleSizeFraction = subtitleSize,
                         subtitleEnabled = subtitleEnabled,
+                        subtitleOffsetSec = subtitleOffset,
+                        onPlaybackPosition = { vm.updatePlaybackPosition(it) },
+                        useExternalSubtitle = streamingStt || subtitleTrack.isNotEmpty(),
                         modifier = Modifier.fillMaxSize()
                     )
                     PlayerMode.WEBVIEW -> WebViewBox(
@@ -576,6 +601,34 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel()) {
                     )
                 }
                 SubtitleOverlay(cue = subtitle)
+
+                // ===== 라이브 자막 오버레이 (재생 중 실시간 자막) =====
+                if (subtitleEnabled && currentLiveCue != null) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(horizontal = 16.dp, vertical = 32.dp),
+                        contentAlignment = Alignment.BottomCenter
+                    ) {
+                        Text(
+                            text = currentLiveCue.translated.ifBlank { currentLiveCue.original },
+                            color = Color.White,
+                            fontSize = (subtitleSize * 400).sp,
+                            fontWeight = androidx.compose.ui.text.font.FontWeight.Bold,
+                            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                            style = androidx.compose.ui.text.TextStyle(
+                                shadow = androidx.compose.ui.graphics.Shadow(
+                                    color = Color.Black,
+                                    offset = androidx.compose.ui.geometry.Offset(1f, 1f),
+                                    blurRadius = 4f
+                                )
+                            ),
+                            modifier = Modifier
+                                .background(Color(0xCC000000), androidx.compose.foundation.shape.RoundedCornerShape(8.dp))
+                                .padding(horizontal = 12.dp, vertical = 8.dp)
+                        )
+                    }
+                }
             }
         }
 

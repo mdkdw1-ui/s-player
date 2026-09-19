@@ -37,6 +37,9 @@ object GroqStt {
     suspend fun transcribe(
         wavFile: File,
         language: String = "auto",
+        firstChunkMaxBytes: Int = 2 * 1024 * 1024,   // 첫 청크 최대 2MB (약 1분)
+        chunkMaxBytes: Int = 15 * 1024 * 1024,       // 이후 청크 15MB (약 8분)
+        onChunkComplete: (suspend (segments: List<Segment>, chunkIndex: Int, totalChunks: Int) -> Unit)? = null,
         onProgress: (Int) -> Unit = {}
     ): Result? = withContext(Dispatchers.IO) {
         val apiKey = BuildConfig.GROQ_API_KEY
@@ -55,7 +58,7 @@ object GroqStt {
         LogBus.log(TAG, "★★★ Groq 청크 병렬 모드 ★★★")
         LogBus.log(TAG, "   파일: ${wavFile.length() / 1024 / 1024}MB")
 
-        val chunks = splitWav(wavFile, MAX_CHUNK_BYTES)
+        val chunks = splitWav(wavFile, firstChunkMaxBytes, chunkMaxBytes)
         if (chunks.isEmpty()) return@withContext null
 
         val total = chunks.size
@@ -66,9 +69,48 @@ object GroqStt {
         val doneCount = java.util.concurrent.atomic.AtomicInteger(0)
         val startTime = System.currentTimeMillis()
 
+        // ===== 첫 청크 즉시 처리 (재생 시작용) =====
+        try {
+            val (firstFile, firstOffset) = chunks[0]
+            LogBus.log(TAG, "  [첫 청크] 우선 처리 시작")
+            var firstResult: Result? = null
+            var attempt = 0
+            while (attempt < 3 && firstResult == null) {
+                try {
+                    firstResult = transcribeSingle(firstFile, language, firstOffset) {}
+                    if (firstResult == null) {
+                        attempt++
+                        if (attempt < 3) delay(2000L * attempt)
+                    }
+                } catch (e: Exception) {
+                    attempt++
+                    if (attempt < 3) delay(2000L * attempt)
+                }
+            }
+            firstFile.delete()
+            results[0] = firstResult
+            val done = doneCount.incrementAndGet()
+            onProgress(done * 100 / total)
+            LogBus.log(TAG, "  [첫 청크] 완료 (성공=${firstResult != null})")
+            
+            // 첫 청크 콜백 즉시
+            if (firstResult != null && onChunkComplete != null) {
+                try {
+                    onChunkComplete(firstResult.segments, 0, total)
+                } catch (e: Exception) {
+                    LogBus.log(TAG, "onChunkComplete 예외: ${e.message}")
+                }
+            }
+        } catch (e: Exception) {
+            LogBus.log(TAG, "첫 청크 예외: ${e.message}")
+        }
+
+        // ===== 나머지 청크 병렬 =====
         try {
             coroutineScope {
-                chunks.forEachIndexed { i, (chunkFile, offsetMs) ->
+                // 인덱스 1부터 (0은 이미 처리)
+                chunks.drop(1).forEachIndexed { idx, (chunkFile, offsetMs) ->
+                    val i = idx + 1
                     launch(Dispatchers.IO) {
                         semaphore.withPermit {
                             val chunkMb = chunkFile.length() / 1024 / 1024
@@ -91,6 +133,16 @@ object GroqStt {
 
                             chunkFile.delete()
                             results[i] = result
+                            
+                            // 청크 완료 시 실시간 콜백
+                            if (result != null && onChunkComplete != null) {
+                                try {
+                                    onChunkComplete(result.segments, i, total)
+                                } catch (e: Exception) {
+                                    LogBus.log(TAG, "onChunkComplete 예외: ${e.message}")
+                                }
+                            }
+                            
                             val done = doneCount.incrementAndGet()
                             val elapsed = System.currentTimeMillis() - startTime
                             val eta = if (done > 0) (elapsed * (total - done) / done) / 1000 else 0
@@ -146,7 +198,9 @@ object GroqStt {
                 .addFormDataPart("model", MODEL)
                 .addFormDataPart("response_format", "verbose_json")
                 .addFormDataPart("timestamp_granularities[]", "segment")
+                .addFormDataPart("timestamp_granularities[]", "word")   // ★ word-level 추가
                 .addFormDataPart("temperature", "0")
+                .addFormDataPart("prompt", "")
 
             if (language != "auto") bodyBuilder.addFormDataPart("language", language)
 
@@ -170,15 +224,110 @@ object GroqStt {
                 val detectedLang: String? = if (json.has("language") && !json.isNull("language"))
                     json.getString("language") else null
 
+                // ===== 환각 필터 + Word-based 재구성 =====
                 val segments = mutableListOf<Segment>()
+
+                // 1) 원본 세그먼트에서 환각 필터
+                val filteredSegments = mutableListOf<Pair<Double, Double>>()  // (start, end) 신뢰 구간
                 val segsArr = json.optJSONArray("segments")
                 if (segsArr != null) {
                     for (i in 0 until segsArr.length()) {
                         val s = segsArr.getJSONObject(i)
-                        val start = (s.optDouble("start", 0.0) * 1000).toLong() + offsetMs
-                        val end = (s.optDouble("end", 0.0) * 1000).toLong() + offsetMs
-                        val t = s.optString("text", "").trim()
-                        if (t.isNotEmpty()) segments.add(Segment(start, end, t))
+                        val noSpeech = s.optDouble("no_speech_prob", 0.0)
+                        val avgLogprob = s.optDouble("avg_logprob", 0.0)
+                        val compression = s.optDouble("compression_ratio", 0.0)
+                        val start = s.optDouble("start", 0.0)
+                        val end = s.optDouble("end", 0.0)
+                        val segText = s.optString("text", "").trim()
+
+                        // 환각 조건
+                        val isHallucination =
+                            noSpeech > 0.6 ||                          // 무음 확률 높음
+                            avgLogprob < -1.5 ||                       // 신뢰도 낮음
+                            compression > 2.4 ||                       // 반복 텍스트
+                            (end - start) < 0.3 ||                     // 0.3초 미만
+                            segText.length < 2 ||                      // 1글자 이하
+                            segText.matches(Regex("^(ん|음|♪|\\.+|。+|、+)+$"))  // 노이즈만
+
+                        if (!isHallucination) {
+                            filteredSegments.add(start to end)
+                        } else {
+                            LogBus.log(TAG, "  [필터] 환각 제거: '$segText' (noSpeech=$noSpeech, logprob=$avgLogprob)")
+                        }
+                    }
+                }
+
+                // 2) Word-level 데이터로 세그먼트 재구성 (더 정확)
+                val wordsArr = json.optJSONArray("words")
+                if (wordsArr != null && wordsArr.length() > 0) {
+                    data class W(val start: Double, val end: Double, val text: String)
+                    val words = mutableListOf<W>()
+                    for (i in 0 until wordsArr.length()) {
+                        val w = wordsArr.getJSONObject(i)
+                        val ws = w.optDouble("start", 0.0)
+                        val we = w.optDouble("end", 0.0)
+                        val wt = w.optString("word", "")
+                        if (wt.isNotBlank() && we > ws) {
+                            words.add(W(ws, we, wt))
+                        }
+                    }
+
+                    // 무음 간격 기준으로 그룹핑 (0.4초 이상 갭이면 새 자막)
+                    val GAP_THRESHOLD = 0.4
+                    val MAX_SEGMENT_DURATION = 6.0   // 최대 6초
+
+                    var curStart = words[0].start
+                    var curEnd = words[0].end
+                    val curText = StringBuilder(words[0].text)
+
+                    for (i in 1 until words.size) {
+                        val w = words[i]
+                        val gap = w.start - curEnd
+                        val segDuration = curEnd - curStart
+
+                        if (gap > GAP_THRESHOLD || segDuration > MAX_SEGMENT_DURATION) {
+                            // 새 세그먼트
+                            val startMs = (curStart * 1000).toLong() + offsetMs
+                            val endMs = (curEnd * 1000).toLong() + offsetMs
+                            val txt = curText.toString().trim()
+                            if (txt.isNotEmpty()) {
+                                segments.add(Segment(startMs, endMs, txt))
+                            }
+                            curStart = w.start
+                            curEnd = w.end
+                            curText.clear()
+                            curText.append(w.text)
+                        } else {
+                            curEnd = w.end
+                            curText.append(w.text)
+                        }
+                    }
+                    // 마지막 세그먼트
+                    val startMs = (curStart * 1000).toLong() + offsetMs
+                    val endMs = (curEnd * 1000).toLong() + offsetMs
+                    val txt = curText.toString().trim()
+                    if (txt.isNotEmpty()) {
+                        segments.add(Segment(startMs, endMs, txt))
+                    }
+
+                    LogBus.log(TAG, "  Word-based 재구성: ${words.size}단어 → ${segments.size}세그먼트")
+                } else if (filteredSegments.isNotEmpty()) {
+                    // Word 데이터 없으면 세그먼트 기반 (필터만 적용)
+                    val segsArr2 = json.optJSONArray("segments")
+                    if (segsArr2 != null) {
+                        for (i in 0 until segsArr2.length()) {
+                            val s = segsArr2.getJSONObject(i)
+                            val start = s.optDouble("start", 0.0)
+                            val end = s.optDouble("end", 0.0)
+                            val t = s.optString("text", "").trim()
+                            if (t.isNotEmpty() && filteredSegments.any { it.first == start }) {
+                                segments.add(Segment(
+                                    (start * 1000).toLong() + offsetMs,
+                                    (end * 1000).toLong() + offsetMs,
+                                    t
+                                ))
+                            }
+                        }
                     }
                 } else if (text.isNotBlank()) {
                     segments.add(Segment(offsetMs, offsetMs, text))
@@ -193,7 +342,11 @@ object GroqStt {
         }
     }
 
-    private fun splitWav(input: File, maxBytes: Int): List<Pair<File, Long>> {
+    private fun splitWav(
+        input: File,
+        firstMaxBytes: Int,
+        restMaxBytes: Int
+    ): List<Pair<File, Long>> {
         val out = mutableListOf<Pair<File, Long>>()
         val bytes = input.readBytes()
         if (bytes.size < 44) return emptyList()
@@ -205,10 +358,11 @@ object GroqStt {
         val bytesPerSecond = headerSampleRate * headerChannels * headerBitsPerSample / 8
         if (bytesPerSecond <= 0) return emptyList()
 
-        val chunkDataSize = maxBytes - 44
         var offset = 0
         var chunkIdx = 0
         while (offset < data.size) {
+            val maxBytes = if (chunkIdx == 0) firstMaxBytes else restMaxBytes
+            val chunkDataSize = maxBytes - 44
             val end = minOf(offset + chunkDataSize, data.size)
             val chunkData = data.sliceArray(offset until end)
             val chunkHeader = buildWavHeader(chunkData.size, headerSampleRate, headerChannels, headerBitsPerSample)
@@ -222,6 +376,7 @@ object GroqStt {
             offset = end
             chunkIdx++
         }
+        LogBus.log(TAG, "청크 분할: 총 ${out.size}개 (첫 번째 ${firstMaxBytes/1024}KB, 이후 ${restMaxBytes/1024}KB)")
         return out
     }
 
