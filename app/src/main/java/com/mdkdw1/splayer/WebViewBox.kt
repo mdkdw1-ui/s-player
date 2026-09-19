@@ -184,6 +184,15 @@ fun WebViewBox(
                         view?.injectAudioCaptureScript()
                     }
 
+                    // ★ SPA URL 변경 감지 (YouTube 등)
+                    override fun doUpdateVisitedHistory(view: WebView?, url: String?, isReload: Boolean) {
+                        super.doUpdateVisitedHistory(view, url, isReload)
+                        url?.let {
+                            onUrlChanged(it)
+                            onLog("history: $it")
+                        }
+                    }
+
                     override fun onReceivedError(
                         view: WebView?, errorCode: Int, description: String?, failingUrl: String?
                     ) {

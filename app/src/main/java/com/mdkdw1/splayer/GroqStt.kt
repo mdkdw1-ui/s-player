@@ -240,11 +240,11 @@ object GroqStt {
                         val end = s.optDouble("end", 0.0)
                         val segText = s.optString("text", "").trim()
 
-                        // 환각 조건
+                        // 환각 조건 (엄격하게 - 노이즈만 제거)
                         val isHallucination =
-                            noSpeech > 0.6 ||                          // 무음 확률 높음
-                            avgLogprob < -1.5 ||                       // 신뢰도 낮음
-                            compression > 2.4 ||                       // 반복 텍스트
+                            noSpeech > 0.9 ||                          // 무음 확률 극히 높음만
+                            avgLogprob < -2.5 ||                       // 신뢰도 극히 낮음만
+                            compression > 3.0 ||                       // 반복 극심
                             (end - start) < 0.3 ||                     // 0.3초 미만
                             segText.length < 2 ||                      // 1글자 이하
                             segText.matches(Regex("^(ん|음|♪|\\.+|。+|、+)+$"))  // 노이즈만
