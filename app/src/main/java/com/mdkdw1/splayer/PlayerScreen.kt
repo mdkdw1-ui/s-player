@@ -107,7 +107,7 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel()) {
         ActivityResultContracts.OpenDocument()
     ) { uri: Uri? ->
         if (uri != null) {
-            vm.runLocalStt(uri)
+            vm.runLocalFileStreaming(uri)
             sttPanelOpen = true
         }
     }

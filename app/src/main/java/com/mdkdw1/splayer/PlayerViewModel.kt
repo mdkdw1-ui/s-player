@@ -300,6 +300,54 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     // ===== 스트리밍 STT (첫 청크 재생) =====
+    // ===== 로컬 파일 스트리밍 (첫 청크 → 즉시 재생) =====
+    fun runLocalFileStreaming(uri: Uri) {
+        if (_sttState.value.running) return
+        val model = _whisperModel.value.model
+        if (!model.isCloud && !_whisperModel.value.installed) {
+            LogBus.log("STT", "로컬 모델 미설치")
+            return
+        }
+
+        resetSegmentBuffer()
+        clearSubtitleTrack()
+        _sttState.value = SttState(running = true, stage = "start", percent = 0)
+        _streamingStt.value = true
+
+        viewModelScope.launch(Dispatchers.IO) {
+            val srt = SubtitlePipeline.runLocalStreaming(
+                context = getApplication(),
+                sourceUri = uri,
+                model = model,
+                sourceLang = _sourceLang.value.code,
+                targetLang = "ko",
+                onProgress = { p ->
+                    _sttState.value = _sttState.value.copy(
+                        stage = p.stage, percent = p.percent, message = p.message, engine = p.engine
+                    )
+                    LogBus.log("LOCAL-STR", "${p.stage} ${p.percent}% ${p.message}")
+                },
+                onSegmentReady = { seg ->
+                    appendSubtitleSegment(seg)
+                    addSegment(seg)
+                },
+                onPlayableReady = { localPath ->
+                    _videoUrl.value = "file://$localPath"
+                    _mode.value = PlayerMode.LOCAL
+                    LogBus.log("VM", "로컬 스트리밍 재생: $localPath")
+                },
+                onLanguageDetected = { lang -> _detectedLang.value = lang }
+            )
+            flushSegments()
+            _sttState.value = _sttState.value.copy(
+                running = false,
+                srtPath = srt?.absolutePath,
+                stage = if (srt != null) "done" else "error"
+            )
+            _streamingStt.value = false
+        }
+    }
+
     fun runUrlSttStreaming(url: String) {
         if (_sttState.value.running) return
         val model = _whisperModel.value.model

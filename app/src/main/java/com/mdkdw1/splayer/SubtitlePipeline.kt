@@ -530,6 +530,208 @@ object SubtitlePipeline {
         return@withContext srtFile
     }
 
+
+    // ================== 로컬 파일 스트리밍 ==================
+    /**
+     * 로컬 파일 첫 청크 STT → 즉시 재생 → 나머지 백그라운드.
+     * @param onPlayableReady 로컬 파일 경로 전달 (재생용)
+     */
+    suspend fun runLocalStreaming(
+        context: Context,
+        sourceUri: Uri,
+        model: WhisperModel,
+        sourceLang: String = "auto",
+        targetLang: String = "ko",
+        onProgress: (Progress) -> Unit,
+        onSegmentReady: (Segment) -> Unit,
+        onPlayableReady: (localFilePath: String) -> Unit,
+        onLanguageDetected: (String) -> Unit = {}
+    ): File? = withContext(Dispatchers.IO) {
+        LogBus.log(TAG, "=== 로컬 STREAMING START (model=${model.id})")
+
+        // 1. 파일 복사 (재생용 원본 유지)
+        onProgress(Progress("copy", 0, "파일 준비 중..."))
+        val inputFile = copyToCache(context, sourceUri)
+        if (inputFile == null) {
+            onProgress(Progress("error", 0, "파일 복사 실패"))
+            return@withContext null
+        }
+        onProgress(Progress("copy", 100, "복사 완료 (${inputFile.length()/1024}KB)"))
+
+        // 2. WAV 디코딩 (STT용)
+        onProgress(Progress("decode", 0, "오디오 디코딩 중..."))
+        val wavFile = AudioPaths.tempWav(context, "local_stream")
+        if (wavFile.exists()) wavFile.delete()
+        val decodeOk = try { AudioDecoder.decodeToWav(inputFile, wavFile) }
+        catch (e: Exception) { LogBus.log(TAG, "디코딩 예외: ${e.message}"); false }
+        if (!decodeOk || !wavFile.exists()) {
+            onProgress(Progress("error", 0, "디코딩 실패"))
+            return@withContext null
+        }
+        onProgress(Progress("decode", 100, "디코딩 완료 (${wavFile.length()/1024}KB)"))
+
+        // 3. 모델 분기
+        if (!model.isCloud) {
+            // 로컬 Whisper → 전체 처리 후 재생
+            LogBus.log(TAG, "로컬 Whisper 모델 → 전체 처리")
+            onPlayableReady(inputFile.absolutePath)
+            return@withContext runWhisperAndSrt_Internal(
+                context, wavFile, model, sourceLang, targetLang,
+                onProgress, onSegmentReady, null, onLanguageDetected
+            )
+        }
+
+        // 4. Groq 스트리밍
+        val collected = mutableListOf<Segment>()
+        val lock = Object()
+        var detectedLang: String? = null
+        var playableTriggered = false
+        val translatorReady = TexTraTranslator.isConfigured()
+
+        fun normalizeLang(lang: String): String = when (lang.lowercase()) {
+            "japanese", "ja", "jp" -> "ja"
+            "korean", "ko", "kr" -> "ko"
+            "english", "en" -> "en"
+            "chinese", "zh", "cn" -> "zh"
+            "spanish", "es" -> "es"
+            "latin", "la", "unknown", "und", "" -> "auto"
+            else -> lang.lowercase().take(2)
+        }
+
+        val groqResult = GroqStt.transcribe(
+            wavFile = wavFile,
+            language = sourceLang,
+            firstChunkMaxBytes = 2 * 1024 * 1024,
+            chunkMaxBytes = 15 * 1024 * 1024,
+            onChunkComplete = { segments, chunkIdx, total ->
+                LogBus.log(TAG, "▶ 로컬 청크 ${chunkIdx + 1}/$total (${segments.size}개)")
+
+                val actualSource = if (sourceLang != "auto") normalizeLang(sourceLang)
+                                   else normalizeLang(detectedLang ?: "ja")
+
+                segments.forEach { seg ->
+                    val tr = try {
+                        if (translatorReady) TexTraTranslator.translate(seg.text, targetLang, actualSource) ?: ""
+                        else GoogleTranslator().translate(seg.text, targetLang, actualSource)
+                    } catch (e: Exception) { "" }
+
+                    val finalSeg = Segment(seg.startMs, seg.endMs, seg.text, tr)
+                    synchronized(lock) { collected.add(finalSeg) }
+                    onSegmentReady(finalSeg)
+                }
+
+                if (!playableTriggered && chunkIdx == 0) {
+                    playableTriggered = true
+                    LogBus.log(TAG, "★★★ 첫 청크 준비 → 로컬 재생 시작 ★★★")
+                    onPlayableReady(inputFile.absolutePath)
+                }
+            },
+            onProgress = { p ->
+                onProgress(Progress("stt", p, "Groq $p%", "groq"))
+            }
+        )
+
+        val finalSegments = synchronized(lock) { collected.toList() }
+        val srtFile = File(AudioPaths.subtitleDir(context), "local_${targetLang}.srt")
+        writeSrt(srtFile, finalSegments)
+        LogBus.log(TAG, "SRT: ${srtFile.absolutePath} (${finalSegments.size}개)")
+
+        if (!playableTriggered) {
+            onPlayableReady(inputFile.absolutePath)
+        }
+
+        onProgress(Progress("done", 100, "완료: ${finalSegments.size} 세그먼트", "textra"))
+        return@withContext srtFile
+    }
+
+    // 기존 runWhisperAndSrt 를 internal 로 노출 (streaming 함수에서 호출)
+    private suspend fun runWhisperAndSrt_Internal(
+        context: Context,
+        wavFile: File,
+        model: WhisperModel,
+        sourceLang: String,
+        targetLang: String,
+        onProgress: (Progress) -> Unit,
+        onSegment: (Segment) -> Unit,
+        cacheSourceKey: String?,
+        onLanguageDetected: (String) -> Unit
+    ): File? {
+        // 기존 runWhisperAndSrt 와 동일 (로컬 Whisper 전용)
+        if (!WhisperModelDownloader.isInstalled(context, model)) {
+            onProgress(Progress("error", 0, "모델 미설치"))
+            return null
+        }
+        val cachedModel = WhisperModelStorage.copyToCache(context, model) ?: return null
+
+        val rawTexts = mutableListOf<Triple<Long, Long, String>>()
+        var detectedLang: String? = null
+        val queue = java.util.concurrent.LinkedBlockingQueue<Triple<Long, Long, String>>()
+
+        onProgress(Progress("stt", 0, "음성 인식 중...", "local"))
+        val threads = Runtime.getRuntime().availableProcessors().coerceAtMost(8)
+
+        val sttOk = try {
+            WhisperBridge.transcribe(
+                modelPath = cachedModel.absolutePath,
+                wavPath = wavFile.absolutePath,
+                language = sourceLang,
+                threads = threads,
+                callback = object : WhisperBridge.SegmentCallback {
+                    override fun onSegment(startMs: Long, endMs: Long, text: String) {
+                        val t = text.trim()
+                        if (t.isNotEmpty()) queue.put(Triple(startMs, endMs, t))
+                    }
+                    override fun onProgress(percent: Int) {
+                        if (percent % 5 == 0 || percent >= 99)
+                            onProgress(Progress("stt", percent, "인식 $percent%", "local"))
+                    }
+                    override fun onComplete() {}
+                    override fun onLog(msg: String) { LogBus.log("JNI", msg) }
+                    override fun onLanguage(langCode: String) {
+                        detectedLang = langCode
+                        onLanguageDetected(langCode)
+                    }
+                }
+            )
+        } catch (e: Exception) { false }
+
+        if (!sttOk) { onProgress(Progress("error", 0, "STT 실패")); return null }
+        while (true) {
+            val s = queue.poll() ?: break
+            rawTexts.add(s)
+        }
+
+        // 번역
+        fun normalizeLang(lang: String): String = when (lang.lowercase()) {
+            "japanese", "ja", "jp" -> "ja"
+            "korean", "ko", "kr" -> "ko"
+            "english", "en" -> "en"
+            "chinese", "zh", "cn" -> "zh"
+            else -> lang.lowercase().take(2)
+        }
+        val actualSource = if (sourceLang != "auto") normalizeLang(sourceLang)
+                           else normalizeLang(detectedLang ?: "ja")
+
+        val translatorReady = TexTraTranslator.isConfigured()
+        val collected = mutableListOf<Segment>()
+
+        rawTexts.forEachIndexed { i, (s, e, t) ->
+            val tr = try {
+                if (translatorReady) TexTraTranslator.translate(t, targetLang, actualSource) ?: ""
+                else GoogleTranslator().translate(t, targetLang, actualSource)
+            } catch (ex: Exception) { "" }
+            val seg = Segment(s, e, t, tr)
+            collected.add(seg)
+            onSegment(seg)
+            onProgress(Progress("translate", (i+1)*100/rawTexts.size, "번역 ${i+1}/${rawTexts.size}", "textra"))
+        }
+
+        val srtFile = File(AudioPaths.subtitleDir(context), "local_${targetLang}.srt")
+        writeSrt(srtFile, collected)
+        onProgress(Progress("done", 100, "완료: ${collected.size} 세그먼트"))
+        return srtFile
+    }
+
 }
 
 // ============================================================================
