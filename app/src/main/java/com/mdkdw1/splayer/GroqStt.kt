@@ -352,41 +352,75 @@ object GroqStt {
         }
     }
 
+    /**
+     * WAV 파일을 스트리밍 방식으로 청크 분할.
+     * - RandomAccessFile 사용 → 메모리 절약 (수 GB 파일도 OK)
+     * - 첫 청크는 작게 (빠른 재생 시작용)
+     */
     private fun splitWav(
         input: File,
         firstMaxBytes: Int,
         restMaxBytes: Int
     ): List<Pair<File, Long>> {
         val out = mutableListOf<Pair<File, Long>>()
-        val bytes = input.readBytes()
-        if (bytes.size < 44) return emptyList()
+        val fileSize = input.length()
+        if (fileSize < 44) return emptyList()
 
-        val data = bytes.sliceArray(44 until bytes.size)
-        val headerSampleRate = readIntLE(bytes, 24)
-        val headerBitsPerSample = readShortLE(bytes, 34)
-        val headerChannels = readShortLE(bytes, 22)
-        val bytesPerSecond = headerSampleRate * headerChannels * headerBitsPerSample / 8
-        if (bytesPerSecond <= 0) return emptyList()
+        java.io.RandomAccessFile(input, "r").use { raf ->
+            // 헤더 (44바이트) 읽기
+            val header = ByteArray(44)
+            raf.readFully(header)
 
-        var offset = 0
-        var chunkIdx = 0
-        while (offset < data.size) {
-            val maxBytes = if (chunkIdx == 0) firstMaxBytes else restMaxBytes
-            val chunkDataSize = maxBytes - 44
-            val end = minOf(offset + chunkDataSize, data.size)
-            val chunkData = data.sliceArray(offset until end)
-            val chunkHeader = buildWavHeader(chunkData.size, headerSampleRate, headerChannels, headerBitsPerSample)
+            val sampleRate = readIntLE(header, 24)
+            val channels = readShortLE(header, 22)
+            val bitsPerSample = readShortLE(header, 34)
+            val bytesPerSecond = sampleRate * channels * bitsPerSample / 8
 
-            val outFile = File(input.parentFile, "${input.nameWithoutExtension}_chunk$chunkIdx.wav")
-            outFile.outputStream().use { os ->
-                os.write(chunkHeader)
-                os.write(chunkData)
+            if (bytesPerSecond <= 0) {
+                LogBus.log(TAG, "WAV 헤더 이상: sr=$sampleRate, ch=$channels, bps=$bitsPerSample")
+                return emptyList()
             }
-            out.add(outFile to (offset.toLong() * 1000L) / bytesPerSecond)
-            offset = end
-            chunkIdx++
+
+            LogBus.log(TAG, "WAV: ${sampleRate}Hz ${channels}ch ${bitsPerSample}bit, ${fileSize/1024}KB")
+
+            var dataOffset = 44L
+            var chunkIdx = 0
+            val buf = ByteArray(256 * 1024)  // 256KB 버퍼
+
+            while (dataOffset < fileSize) {
+                val maxBytes = if (chunkIdx == 0) firstMaxBytes else restMaxBytes
+                val chunkDataMax = (maxBytes - 44).toLong()
+                val actualSize = minOf(chunkDataMax, fileSize - dataOffset).toInt()
+
+                val outFile = File(input.parentFile, "${input.nameWithoutExtension}_chunk$chunkIdx.wav")
+
+                outFile.outputStream().use { os ->
+                    // 새 WAV 헤더 생성
+                    os.write(buildWavHeader(actualSize, sampleRate, channels, bitsPerSample))
+
+                    // 원본에서 청크 데이터만 스트리밍 복사
+                    raf.seek(dataOffset)
+                    var remaining = actualSize
+                    while (remaining > 0) {
+                        val toRead = minOf(buf.size, remaining)
+                        val n = raf.read(buf, 0, toRead)
+                        if (n <= 0) break
+                        os.write(buf, 0, n)
+                        remaining -= n
+                    }
+                }
+
+                val offsetMs = ((dataOffset - 44) * 1000L) / bytesPerSecond
+                out.add(outFile to offsetMs)
+
+                dataOffset += actualSize
+                chunkIdx++
+
+                LogBus.log(TAG, "  청크 $chunkIdx: ${actualSize/1024}KB, offset=${offsetMs}ms")
+            }
         }
-        LogBus.log(TAG, "청크 분할: 총 ${out.size}개 (첫 번째 ${firstMaxBytes/1024}KB, 이후 ${restMaxBytes/1024}KB)")
+
+        LogBus.log(TAG, "★★★ 청크 분할 완료: 총 ${out.size}개 (스트리밍) ★★★")
         return out
     }
 

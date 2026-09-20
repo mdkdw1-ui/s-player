@@ -360,11 +360,29 @@ object SubtitlePipeline {
         val ext = name.substringAfterLast('.', "bin")
         val dest = AudioPaths.tempAudioInput(context, "input", ext)
         if (dest.exists()) dest.delete()
+
+        // ★ 스트리밍 복사 (메모리 절약, 대용량 파일 지원)
         context.contentResolver.openInputStream(uri)?.use { input ->
-            dest.outputStream().use { it.write(input.readBytes()) }
+            dest.outputStream().use { output ->
+                val buf = ByteArray(256 * 1024)  // 256KB
+                var total = 0L
+                while (true) {
+                    val n = input.read(buf)
+                    if (n <= 0) break
+                    output.write(buf, 0, n)
+                    total += n
+                    if (total % (10L * 1024 * 1024) < buf.size) {
+                        LogBus.log(TAG, "복사 중: ${total / 1024 / 1024}MB")
+                    }
+                }
+            }
         }
+        LogBus.log(TAG, "복사 완료: ${dest.length() / 1024 / 1024}MB")
         dest
-    } catch (e: Exception) { null }
+    } catch (e: Exception) {
+        LogBus.log(TAG, "복사 실패: ${e.message}")
+        null
+    }
 
     private fun queryFileName(context: Context, uri: Uri): String? = try {
         context.contentResolver.query(uri, null, null, null, null)?.use { c ->
